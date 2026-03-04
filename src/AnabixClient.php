@@ -80,7 +80,7 @@ class AnabixClient
      */
     public function updateContact(int $contactId, array $contactData): ?array
     {
-        $contactData['idContact'] = $contactId;
+        $contactData['id'] = $contactId;
 
         $this->logger->info("Updating Anabix contact", ['id' => $contactId]);
 
@@ -125,7 +125,7 @@ class AnabixClient
             'title' => $title,
             'body' => $body,
             'type' => $type,
-            'timestamp' => time(),
+            'timestamp' => date('Y-m-d H:i:s'),
         ]);
     }
 
@@ -134,6 +134,7 @@ class AnabixClient
      */
     private function request(string $requestType, string $requestMethod, array $data = []): ?array
     {
+        // Anabix API expects multipart/form-data with a 'json' field
         $payload = json_encode([
             'username' => $this->user,
             'token' => $this->token,
@@ -146,12 +147,8 @@ class AnabixClient
         curl_setopt_array($ch, [
             CURLOPT_URL => $this->apiUrl,
             CURLOPT_POST => true,
-            CURLOPT_POSTFIELDS => $payload,
+            CURLOPT_POSTFIELDS => ['json' => $payload],
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER => [
-                'Content-Type: application/json',
-                'Content-Length: ' . strlen($payload),
-            ],
             CURLOPT_TIMEOUT => 30,
             CURLOPT_CONNECTTIMEOUT => 10,
         ]);
