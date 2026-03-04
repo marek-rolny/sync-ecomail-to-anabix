@@ -1,0 +1,5 @@
+.env
+storage/logs/*
+storage/state/*
+!storage/logs/.gitkeep
+!storage/state/.gitkeep
