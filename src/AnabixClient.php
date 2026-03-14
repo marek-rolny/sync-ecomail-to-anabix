@@ -111,21 +111,22 @@ class AnabixClient
     }
 
     /**
-     * Create an activity on a contact (for Phase 2).
+     * Create an activity on a contact.
      *
      * @param int $contactId The Anabix contact ID
      * @param string $title Activity title
      * @param string $body Activity description
      * @param string $type Activity type (e.g. 'note', 'email', 'call')
+     * @param string|null $timestamp Custom timestamp (Y-m-d H:i:s), defaults to now
      */
-    public function createActivity(int $contactId, string $title, string $body, string $type = 'note'): ?array
+    public function createActivity(int $contactId, string $title, string $body, string $type = 'note', ?string $timestamp = null): ?array
     {
         return $this->request('activities', 'create', [
             'idContact' => $contactId,
             'title' => $title,
             'body' => $body,
             'type' => $type,
-            'timestamp' => date('Y-m-d H:i:s'),
+            'timestamp' => $timestamp ?? date('Y-m-d H:i:s'),
         ]);
     }
 

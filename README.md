@@ -88,8 +88,47 @@ Nastavte URL `https://your-server.com/webhook.php` v Ecomailu:
 - Auth: `username` + `token` v těle requestu
 - Format: JSON POST na `https://FIRMA.anabix.cz/api`
 
+### Import poznámek z Campaign Monitoru (`sync-notes.php`)
+
+Importuje data z Google tabulky (export z Campaign Monitoru) a vytvoří poznámky u kontaktů v Anabixu.
+
+**Formát Google tabulky:**
+| Sloupec A | Sloupec B | Sloupec C |
+|-----------|-----------|-----------|
+| email     | datum     | důvod     |
+| jan@example.cz | 2024-05-15 | MarkedAsSpam |
+| petra@example.cz | 2024-06-01 | Unsubscribed |
+
+**Způsoby spuštění:**
+
+```bash
+# Z lokálního CSV souboru
+php sync-notes.php /cesta/k/export.csv
+
+# Z publikované Google tabulky (CSV URL)
+php sync-notes.php "https://docs.google.com/spreadsheets/d/.../pub?output=csv"
+
+# Nebo nastavte GOOGLE_SHEET_CSV_URL v .env a spusťte bez argumentů
+php sync-notes.php
+
+# Náhled bez zápisu do Anabixu (dry-run)
+php sync-notes.php --dry-run
+php sync-notes.php /cesta/k/export.csv --dry-run
+```
+
+**Jak publikovat Google tabulku jako CSV:**
+1. Otevřete tabulku v Google Sheets
+2. Soubor > Sdílet > Publikovat na webu
+3. Vyberte list a formát **CSV**
+4. Zkopírujte URL a vložte do `.env` jako `GOOGLE_SHEET_CSV_URL`
+
+Skript automaticky:
+- Přeskočí hlavičku tabulky
+- Validuje emaily a data
+- Zabraňuje duplicitnímu vytváření poznámek (state tracking)
+- Respektuje rate limiting API (200ms pauza mezi requesty)
+
 ## Fáze 2 (plánováno)
 
 - Sledování aktivit (otevřené emaily, kliknuté linky)
-- Zápis aktivit do Anabixu (endpoint `activities.create`)
 - Webhook z Ecomailu pro campaign aktivity
