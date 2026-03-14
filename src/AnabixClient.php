@@ -118,14 +118,14 @@ class AnabixClient
      * @param string $body Activity description
      * @param string $type Activity type (e.g. 'note', 'email', 'call')
      */
-    public function createActivity(int $contactId, string $title, string $body, string $type = 'note'): ?array
+    public function createActivity(int $contactId, string $title, string $body, string $type = 'note', ?string $timestamp = null): ?array
     {
         return $this->request('activities', 'create', [
             'idContact' => $contactId,
             'title' => $title,
             'body' => $body,
             'type' => $type,
-            'timestamp' => date('Y-m-d H:i:s'),
+            'timestamp' => $timestamp ?? date('Y-m-d H:i:s'),
         ]);
     }
 
