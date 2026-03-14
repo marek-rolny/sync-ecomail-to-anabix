@@ -44,6 +44,9 @@ $anabix = new AnabixClient(
 
 $groupIds = array_filter(array_map('intval', explode(',', env('WLB_ANABIX_GROUP_IDS', env('ANABIX_GROUP_IDS', '')))));
 
+// Activity owner ID (e.g. 5 for "Robot Karel")
+$activityOwnerId = env('ANABIX_ACTIVITY_OWNER_ID', '') !== '' ? (int) env('ANABIX_ACTIVITY_OWNER_ID') : null;
+
 // Parse form configurations: "formId:password,formId:password,..."
 $formsConfig = env('WLB_FORMS', '');
 if ($formsConfig === '') {
@@ -148,7 +151,7 @@ foreach ($forms as $form) {
                     $title = "Webový formulář #{$formId}";
                     $body = Transformer::wlbToActivityNote($submission, $formId);
 
-                    $activityResult = $anabix->createActivity((int) $contactId, $title, $body, 'note');
+                    $activityResult = $anabix->createActivity((int) $contactId, $title, $body, 'note', $activityOwnerId);
 
                     if ($activityResult !== null) {
                         $report['activities']++;

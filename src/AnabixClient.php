@@ -111,22 +111,29 @@ class AnabixClient
     }
 
     /**
-     * Create an activity on a contact (for Phase 2).
+     * Create an activity on a contact.
      *
      * @param int $contactId The Anabix contact ID
      * @param string $title Activity title
      * @param string $body Activity description
      * @param string $type Activity type (e.g. 'note', 'email', 'call')
+     * @param int|null $ownerId Owner user ID in Anabix (e.g. 5 for "Robot Karel")
      */
-    public function createActivity(int $contactId, string $title, string $body, string $type = 'note'): ?array
+    public function createActivity(int $contactId, string $title, string $body, string $type = 'note', ?int $ownerId = null): ?array
     {
-        return $this->request('activities', 'create', [
+        $data = [
             'idContact' => $contactId,
             'title' => $title,
             'body' => $body,
             'type' => $type,
             'timestamp' => date('Y-m-d H:i:s'),
-        ]);
+        ];
+
+        if ($ownerId !== null) {
+            $data['idOwner'] = $ownerId;
+        }
+
+        return $this->request('activities', 'create', $data);
     }
 
     /**
