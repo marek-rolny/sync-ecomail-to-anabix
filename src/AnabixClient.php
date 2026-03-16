@@ -117,17 +117,45 @@ class AnabixClient
      * @param string $title Activity title
      * @param string $body Activity description
      * @param string $type Activity type (e.g. 'note', 'email', 'call')
-     * @param string|null $timestamp Custom timestamp (Y-m-d H:i:s), defaults to now
+     * @param string|null $timestamp Activity date (Y-m-d H:i:s), defaults to now
+     * @param int|null $idUser Activity owner user ID (e.g. 5 for Robot Karel)
      */
-    public function createActivity(int $contactId, string $title, string $body, string $type = 'note', ?string $timestamp = null): ?array
-    {
-        return $this->request('activities', 'create', [
+    public function createActivity(
+        int $contactId,
+        string $title,
+        string $body,
+        string $type = 'note',
+        ?string $timestamp = null,
+        ?int $idUser = null
+    ): ?array {
+        $data = [
             'idContact' => $contactId,
             'title' => $title,
             'body' => $body,
             'type' => $type,
             'timestamp' => $timestamp ?? date('Y-m-d H:i:s'),
+        ];
+
+        if ($idUser !== null) {
+            $data['idUser'] = $idUser;
+        }
+
+        $this->logger->info("Creating Anabix activity", [
+            'contact' => $contactId,
+            'title' => $title,
+            'idUser' => $idUser,
         ]);
+
+        $response = $this->request('activities', 'create', $data);
+
+        if ($response === null) {
+            $this->logger->error("Failed to create Anabix activity", [
+                'contact' => $contactId,
+                'title' => $title,
+            ]);
+        }
+
+        return $response;
     }
 
     /**
