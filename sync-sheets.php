@@ -27,6 +27,23 @@ if (!file_exists($envFile)) {
 }
 loadEnv($envFile);
 
+// ── Validate required config ─────────────────────────────────────────
+
+$requiredVars = ['ANABIX_API_USER', 'ANABIX_API_TOKEN', 'ANABIX_API_URL', 'GOOGLE_SHEET_ID'];
+foreach ($requiredVars as $var) {
+    if (env($var) === '') {
+        fwrite(STDERR, "Error: Required config variable {$var} is not set in .env\n");
+        exit(1);
+    }
+}
+
+// Debug: show loaded credential lengths and detect invisible chars
+$debugUser = env('ANABIX_API_USER');
+$debugToken = env('ANABIX_API_TOKEN');
+echo "[DEBUG] ANABIX_API_USER  length=" . strlen($debugUser) . " hex_first4=" . bin2hex(substr($debugUser, 0, 4)) . PHP_EOL;
+echo "[DEBUG] ANABIX_API_TOKEN length=" . strlen($debugToken) . " hex_first4=" . bin2hex(substr($debugToken, 0, 4)) . PHP_EOL;
+unset($debugUser, $debugToken);
+
 // ── Initialize components ────────────────────────────────────────────
 
 $logger = new Logger(__DIR__ . '/storage/logs');
