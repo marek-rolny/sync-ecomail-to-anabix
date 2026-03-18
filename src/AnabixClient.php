@@ -198,11 +198,18 @@ class AnabixClient
         return $response;
     }
 
+    /** @var int Counter for debug output - show details for first N API calls */
+    private int $debugCallCount = 0;
+    private const DEBUG_FIRST_N_CALLS = 3;
+
     /**
      * Send a request to the Anabix API.
      */
     private function request(string $requestType, string $requestMethod, array $data = []): ?array
     {
+        $this->debugCallCount++;
+        $showDebug = $this->debugCallCount <= self::DEBUG_FIRST_N_CALLS;
+
         // Anabix API expects multipart/form-data with a 'json' field
         $payload = json_encode([
             'username' => $this->user,
@@ -211,6 +218,10 @@ class AnabixClient
             'requestMethod' => $requestMethod,
             'data' => $data,
         ], JSON_UNESCAPED_UNICODE);
+
+        if ($showDebug) {
+            fwrite(STDERR, "[DEBUG] API request #{$this->debugCallCount}: {$requestType}/{$requestMethod} -> {$this->apiUrl}\n");
+        }
 
         $ch = curl_init();
         curl_setopt_array($ch, [
@@ -228,6 +239,9 @@ class AnabixClient
         curl_close($ch);
 
         if ($error) {
+            if ($showDebug) {
+                fwrite(STDERR, "[DEBUG] API cURL ERROR: {$error}\n");
+            }
             $this->logger->error("Anabix API curl error", [
                 'error' => $error,
                 'type' => $requestType,
@@ -236,9 +250,16 @@ class AnabixClient
             return null;
         }
 
+        if ($showDebug) {
+            fwrite(STDERR, "[DEBUG] API response (HTTP {$httpCode}): " . mb_substr($responseBody, 0, 500) . "\n");
+        }
+
         $response = json_decode($responseBody, true);
 
         if ($response === null) {
+            if ($showDebug) {
+                fwrite(STDERR, "[DEBUG] API invalid JSON!\n");
+            }
             $this->logger->error("Anabix API invalid JSON response", [
                 'http_code' => $httpCode,
                 'response' => $responseBody,
@@ -248,6 +269,9 @@ class AnabixClient
 
         // Check for API-level error in the response
         if (isset($response['error']) && $response['error']) {
+            if ($showDebug) {
+                fwrite(STDERR, "[DEBUG] API error flag: " . json_encode($response['error']) . " message: " . ($response['message'] ?? '') . "\n");
+            }
             $this->logger->error("Anabix API returned error", [
                 'error' => $response['error'],
                 'message' => $response['message'] ?? '',

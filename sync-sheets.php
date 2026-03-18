@@ -134,6 +134,7 @@ try {
             output("  Radek {$rowNum}: PRESKOCEN (kontakt nenalezen v Anabixu) - {$email}");
             $logger->warning("Contact not found in Anabix", ['email' => $email, 'row' => $rowNum]);
             $report['skipped_not_found']++;
+            usleep(200000); // 200ms - rate limiting
             continue;
         }
 
