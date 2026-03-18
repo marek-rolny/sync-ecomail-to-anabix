@@ -167,8 +167,9 @@ try {
             continue;
         }
 
-        // Build activity body from Reason column
-        $body = $reason !== '' ? $reason : '(bez udani duvodu)';
+        // Build activity body with details from sheet
+        $reasonText = $reason !== '' ? $reason : '(bez udani duvodu)';
+        $body = "Datum: {$date}\nDůvod: {$reasonText}";
 
         // Use the date from the sheet, default to now
         $timestamp = $date !== '' ? $date . ' 00:00:00' : date('Y-m-d H:i:s');
