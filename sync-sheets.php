@@ -45,7 +45,7 @@ $sheets = new GoogleSheetsClient(
     $logger
 );
 
-$activityOwner = env('ANABIX_ACTIVITY_OWNER', 'Robot Karel');
+$activityIdUser = (int) env('ANABIX_ACTIVITY_ID_USER', '5');
 $activityType = env('ANABIX_ACTIVITY_TYPE', 'note');
 $activityTitle = env('ANABIX_ACTIVITY_TITLE', 'Odhlášení z newsletteru');
 
@@ -66,12 +66,12 @@ function output(string $message): void
 
 output("=== Sync Google Sheets -> Anabix ===");
 output("Spreadsheet ID: " . env('GOOGLE_SHEET_ID'));
-output("Activity owner: {$activityOwner}");
+output("Activity idUser: {$activityIdUser}");
 output("");
 
 $logger->info("Starting Google Sheets sync", [
     'sheet_id' => env('GOOGLE_SHEET_ID'),
-    'owner' => $activityOwner,
+    'idUser' => $activityIdUser,
 ]);
 
 $report = [
@@ -158,11 +158,11 @@ try {
             $body,
             $activityType,
             $timestamp,
-            $activityOwner
+            $activityIdUser
         );
 
         if ($result !== null) {
-            output("  Radek {$rowNum}: VYTVORENO - {$email} (datum: {$date}, vlastnik: {$activityOwner})");
+            output("  Radek {$rowNum}: VYTVORENO - {$email} (datum: {$date}, idUser: {$activityIdUser})");
             $report['created']++;
             $syncState->markSynced($syncKey);
         } else {
