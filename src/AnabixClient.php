@@ -37,16 +37,56 @@ class AnabixClient
         ]);
 
         if ($response === null) {
+            $this->logger->warning("findContactByEmail: API returned null", ['email' => $email]);
             return null;
         }
 
-        // Response may contain array of contacts or single contact
-        $contacts = $response['data'] ?? $response;
+        $this->logger->debug("findContactByEmail: raw response", [
+            'email' => $email,
+            'response_keys' => is_array($response) ? array_keys($response) : gettype($response),
+            'response' => $response,
+        ]);
 
-        if (is_array($contacts) && !empty($contacts)) {
-            // Return first matching contact
-            return is_array(reset($contacts)) ? reset($contacts) : $contacts;
+        // Try to extract contact(s) from the response.
+        // Anabix API may return data in several formats:
+        //   {"error":false, "data": {"123": {contact...}, "456": {contact...}}}
+        //   {"error":false, "data": [{contact...}]}
+        //   {"error":false, "data": {single contact...}}
+        //   {"error":false, "123": {contact...}}  (contacts at top level)
+        //   or other variations
+
+        // 1) Try $response['data']
+        $data = $response['data'] ?? null;
+
+        if (is_array($data) && !empty($data)) {
+            $first = reset($data);
+            // If data contains nested arrays (list of contacts), return first
+            if (is_array($first)) {
+                return $first;
+            }
+            // If data itself looks like a single contact (has idContact or email key)
+            if (isset($data['idContact']) || isset($data['id']) || isset($data['email'])) {
+                return $data;
+            }
+            // Data contains scalar values keyed by field names - might be a contact
+            return $data;
         }
+
+        // 2) Try top-level response (minus error/message keys)
+        $filtered = array_filter($response, function ($value, $key) {
+            return !in_array($key, ['error', 'message', 'data'], true) && is_array($value);
+        }, ARRAY_FILTER_USE_BOTH);
+
+        if (!empty($filtered)) {
+            $first = reset($filtered);
+            if (is_array($first)) {
+                return $first;
+            }
+        }
+
+        $this->logger->warning("findContactByEmail: contact not found", [
+            'email' => $email,
+        ]);
 
         return null;
     }
