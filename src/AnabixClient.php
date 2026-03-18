@@ -120,7 +120,7 @@ class AnabixClient
      */
     public function updateContact(int $contactId, array $contactData): ?array
     {
-        $contactData['id'] = $contactId;
+        $contactData['idContact'] = $contactId;
 
         $this->logger->info("Updating Anabix contact", ['id' => $contactId]);
 
