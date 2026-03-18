@@ -19,7 +19,7 @@ require_once __DIR__ . '/src/Transformer.php';
 // Load configuration
 $envFile = __DIR__ . '/.env';
 if (!file_exists($envFile)) {
-    fwrite(STDERR, "Error: .env file not found. Copy .env.example to .env and configure it.\n");
+    echo("Error: .env file not found. Copy .env.example to .env and configure it.\n");
     exit(1);
 }
 loadEnv($envFile);
