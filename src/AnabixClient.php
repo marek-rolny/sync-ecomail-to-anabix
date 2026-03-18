@@ -240,7 +240,7 @@ class AnabixClient
 
         if ($error) {
             if ($showDebug) {
-                echo "[DEBUG] API cURL ERROR: {$error}\n");
+                echo "[DEBUG] API cURL ERROR: {$error}" . PHP_EOL;
             }
             $this->logger->error("Anabix API curl error", [
                 'error' => $error,
@@ -251,14 +251,14 @@ class AnabixClient
         }
 
         if ($showDebug) {
-            echo "[DEBUG] API response (HTTP {$httpCode}): " . mb_substr($responseBody, 0, 500) . "\n");
+            echo "[DEBUG] API response (HTTP {$httpCode}): " . mb_substr($responseBody, 0, 500) . PHP_EOL;
         }
 
         $response = json_decode($responseBody, true);
 
         if ($response === null) {
             if ($showDebug) {
-                echo "[DEBUG] API invalid JSON!\n");
+                echo "[DEBUG] API invalid JSON!" . PHP_EOL;
             }
             $this->logger->error("Anabix API invalid JSON response", [
                 'http_code' => $httpCode,
@@ -270,7 +270,7 @@ class AnabixClient
         // Check for API-level error in the response
         if (isset($response['error']) && $response['error']) {
             if ($showDebug) {
-                echo "[DEBUG] API error flag: " . json_encode($response['error']) . " message: " . ($response['message'] ?? '') . "\n");
+                echo "[DEBUG] API error flag: " . json_encode($response['error']) . " message: " . ($response['message'] ?? '') . PHP_EOL;
             }
             $this->logger->error("Anabix API returned error", [
                 'error' => $response['error'],
