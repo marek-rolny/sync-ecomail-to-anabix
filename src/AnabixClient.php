@@ -193,6 +193,7 @@ class AnabixClient
                 'contact' => $contactId,
                 'title' => $title,
             ]);
+            echo "[DEBUG] createActivity FAILED for contact #{$contactId} - check log for details" . PHP_EOL;
         }
 
         return $response;
@@ -200,7 +201,7 @@ class AnabixClient
 
     /** @var int Counter for debug output - show details for first N API calls */
     private int $debugCallCount = 0;
-    private const DEBUG_FIRST_N_CALLS = 3;
+    private const DEBUG_FIRST_N_CALLS = 10;
 
     /**
      * Send a request to the Anabix API.
@@ -276,9 +277,8 @@ class AnabixClient
 
         if ($isError) {
             $errorMessage = $response['message'] ?? $response['data'] ?? '';
-            if ($showDebug) {
-                echo "[DEBUG] API error: " . $errorMessage . PHP_EOL;
-            }
+            // Always show API errors, not just for first N calls
+            echo "[DEBUG] API error ({$requestType}/{$requestMethod}): " . $errorMessage . PHP_EOL;
             $this->logger->error("Anabix API returned error", [
                 'error' => $response['error'] ?? $response['status'] ?? 'unknown',
                 'message' => $errorMessage,

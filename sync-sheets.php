@@ -174,6 +174,17 @@ try {
         $timestamp = $date !== '' ? $date . ' 00:00:00' : date('Y-m-d H:i:s');
 
         // Create activity in Anabix
+        $activityData = [
+            'idContact' => (int) $contactId,
+            'title' => $activityTitle,
+            'body' => $body,
+            'type' => $activityType,
+            'timestamp' => $timestamp,
+            'idUser' => $activityIdUser,
+        ];
+        output("  Radek {$rowNum}: Vytvarim udalost pro kontakt #{$contactId} ({$email})");
+        output("    -> data: " . json_encode($activityData, JSON_UNESCAPED_UNICODE));
+
         $result = $anabix->createActivity(
             (int) $contactId,
             $activityTitle,
@@ -189,6 +200,7 @@ try {
             $syncState->markSynced($syncKey);
         } else {
             output("  Radek {$rowNum}: CHYBA pri vytvareni udalosti - {$email}");
+            output("    -> Zkontrolujte logy pro detail chyby");
             $report['failed']++;
             $report['errors'][] = "Row {$rowNum}: Failed to create activity for {$email}";
         }
