@@ -221,6 +221,7 @@ class AnabixClient
 
         if ($showDebug) {
             echo "[DEBUG] API request #{$this->debugCallCount}: {$requestType}/{$requestMethod} -> {$this->apiUrl}" . PHP_EOL;
+            echo "[DEBUG] credentials: user=" . (empty($this->user) ? '(EMPTY)' : substr($this->user, 0, 3) . '***') . " token=" . (empty($this->token) ? '(EMPTY)' : substr($this->token, 0, 4) . '***') . PHP_EOL;
         }
 
         $ch = curl_init();
