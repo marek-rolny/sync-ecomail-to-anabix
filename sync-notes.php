@@ -25,7 +25,7 @@ require_once __DIR__ . '/src/AnabixClient.php';
 // Load configuration
 $envFile = __DIR__ . '/.env';
 if (!file_exists($envFile)) {
-    fwrite(STDERR, "Error: .env file not found. Copy .env.example to .env and configure it.\n");
+    echo("Error: .env file not found. Copy .env.example to .env and configure it.\n");
     exit(1);
 }
 loadEnv($envFile);
@@ -40,9 +40,9 @@ $csvSource = reset($args) ?: '';
 if ($csvSource === '') {
     $csvSource = env('GOOGLE_SHEET_CSV_URL', '');
     if ($csvSource === '') {
-        fwrite(STDERR, "Error: No CSV source provided.\n");
-        fwrite(STDERR, "Usage: php sync-notes.php [path/to/file.csv|URL] [--dry-run]\n");
-        fwrite(STDERR, "Or set GOOGLE_SHEET_CSV_URL in .env\n");
+        echo("Error: No CSV source provided.\n");
+        echo("Usage: php sync-notes.php [path/to/file.csv|URL] [--dry-run]\n");
+        echo("Or set GOOGLE_SHEET_CSV_URL in .env\n");
         exit(1);
     }
 }
@@ -63,7 +63,7 @@ $logger->info("Loading CSV data", ['source' => $csvSource, 'dry_run' => $dryRun]
 
 $rows = loadCsvData($csvSource);
 if ($rows === null) {
-    fwrite(STDERR, "Error: Failed to load CSV from: {$csvSource}\n");
+    echo("Error: Failed to load CSV from: {$csvSource}\n");
     exit(1);
 }
 
@@ -269,7 +269,7 @@ function fetchUrl(string $url): ?string
     curl_close($ch);
 
     if ($error || $httpCode !== 200) {
-        fwrite(STDERR, "Error fetching URL: HTTP {$httpCode}, {$error}\n");
+        echo("Error fetching URL: HTTP {$httpCode}, {$error}\n");
         return null;
     }
 

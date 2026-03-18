@@ -26,7 +26,7 @@ require_once __DIR__ . '/src/GoogleSheetsClient.php';
 
 $envFile = __DIR__ . '/.env';
 if (!file_exists($envFile)) {
-    fwrite(STDERR, "Error: .env file not found. Copy .env.example to .env and configure it.\n");
+    echo "Error: .env file not found. Copy .env.example to .env and configure it.\n";
     exit(1);
 }
 loadEnv($envFile);
@@ -36,7 +36,7 @@ loadEnv($envFile);
 $requiredVars = ['ANABIX_API_USER', 'ANABIX_API_TOKEN', 'ANABIX_API_URL', 'GOOGLE_SHEET_ID'];
 foreach ($requiredVars as $var) {
     if (env($var) === '') {
-        fwrite(STDERR, "Error: Required config variable {$var} is not set in .env\n");
+        echo "Error: Required config variable {$var} is not set in .env\n";
         exit(1);
     }
 }
