@@ -27,6 +27,16 @@ if (!file_exists($envFile)) {
 }
 loadEnv($envFile);
 
+// ── Validate required config ─────────────────────────────────────────
+
+$requiredVars = ['ANABIX_API_USER', 'ANABIX_API_TOKEN', 'ANABIX_API_URL', 'GOOGLE_SHEET_ID'];
+foreach ($requiredVars as $var) {
+    if (env($var) === '') {
+        fwrite(STDERR, "Error: Required config variable {$var} is not set in .env\n");
+        exit(1);
+    }
+}
+
 // ── Initialize components ────────────────────────────────────────────
 
 $logger = new Logger(__DIR__ . '/storage/logs');

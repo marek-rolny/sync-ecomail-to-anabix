@@ -268,13 +268,19 @@ class AnabixClient
         }
 
         // Check for API-level error in the response
-        if (isset($response['error']) && $response['error']) {
+        // Anabix API returns errors in two formats:
+        //   {"error": true, "message": "..."} or {"status": "ERROR", "data": "..."}
+        $isError = (isset($response['error']) && $response['error'])
+            || (isset($response['status']) && strtoupper($response['status']) === 'ERROR');
+
+        if ($isError) {
+            $errorMessage = $response['message'] ?? $response['data'] ?? '';
             if ($showDebug) {
-                echo "[DEBUG] API error flag: " . json_encode($response['error']) . " message: " . ($response['message'] ?? '') . PHP_EOL;
+                echo "[DEBUG] API error: " . $errorMessage . PHP_EOL;
             }
             $this->logger->error("Anabix API returned error", [
-                'error' => $response['error'],
-                'message' => $response['message'] ?? '',
+                'error' => $response['error'] ?? $response['status'] ?? 'unknown',
+                'message' => $errorMessage,
                 'type' => $requestType,
                 'method' => $requestMethod,
             ]);
