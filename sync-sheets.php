@@ -170,6 +170,9 @@ try {
             $report['failed']++;
             $report['errors'][] = "Row {$rowNum}: Failed to create activity for {$email}";
         }
+
+        // Delay to avoid Anabix API rate limiting
+        usleep(200000); // 200ms
     }
 
     $syncState->updateLastSync();
