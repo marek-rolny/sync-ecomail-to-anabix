@@ -168,12 +168,19 @@ class AnabixClient
         ?string $timestamp = null,
         ?int $idUser = null
     ): ?array {
+        // Anabix API expects Unix timestamp (integer), not datetime string
+        if ($timestamp !== null) {
+            $unixTimestamp = is_numeric($timestamp) ? (int) $timestamp : strtotime($timestamp);
+        } else {
+            $unixTimestamp = time();
+        }
+
         $data = [
             'idContact' => $contactId,
             'title' => $title,
             'body' => $body,
             'type' => $type,
-            'timestamp' => $timestamp ?? date('Y-m-d H:i:s'),
+            'timestamp' => $unixTimestamp,
         ];
 
         if ($idUser !== null) {
