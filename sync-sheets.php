@@ -174,16 +174,8 @@ try {
         $timestamp = $date !== '' ? $date . ' 00:00:00' : date('Y-m-d H:i:s');
 
         // Create activity in Anabix
-        $activityData = [
-            'idContact' => (int) $contactId,
-            'title' => $activityTitle,
-            'body' => $body,
-            'type' => $activityType,
-            'timestamp' => $timestamp,
-            'idUser' => $activityIdUser,
-        ];
         output("  Radek {$rowNum}: Vytvarim udalost pro kontakt #{$contactId} ({$email})");
-        output("    -> data: " . json_encode($activityData, JSON_UNESCAPED_UNICODE));
+        output("    -> data: idContact={$contactId}, title=\"{$activityTitle}\", body=\"{$body}\", type={$activityType}, timestamp={$timestamp} (" . strtotime($timestamp) . "), idUser={$activityIdUser}");
 
         $result = $anabix->createActivity(
             (int) $contactId,
