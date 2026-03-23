@@ -163,7 +163,6 @@ function processContactPages(
     AnabixClient $anabix,
     EcomailClient $ecomail,
     Transformer $transformer,
-    array $listMemberMap,
     bool $fetchOrgs,
     bool $fetchDetail,
     int $orgConcurrency,
@@ -171,9 +170,20 @@ function processContactPages(
 ): bool {
     $hasContacts = false;
 
+    $debugDone = false;
+
     foreach ($pages as $pageContacts) {
         $hasContacts = true;
         $report['contacts_fetched'] += count($pageContacts);
+
+        // Debug: log structure of first contact to verify lists are present
+        if (!$debugDone && !empty($pageContacts)) {
+            $first = reset($pageContacts);
+            $listsInfo = isset($first['lists']) ? count($first['lists']) . ' lists' : 'no lists field';
+            $cfInfo = isset($first['customFields']) ? count($first['customFields']) . ' custom fields' : 'no customFields';
+            output("  Debug first contact: {$listsInfo}, {$cfInfo}, keys: " . implode(',', array_keys($first)));
+            $debugDone = true;
+        }
 
         // Fetch missing organizations for this page
         if ($fetchOrgs) {
@@ -204,13 +214,6 @@ function processContactPages(
                     $contact = array_merge($contact, $detail);
                 }
                 usleep(200000);
-            }
-
-            if ($contactId !== null && empty($contact['lists']) && isset($listMemberMap[(int) $contactId])) {
-                $contact['lists'] = array_map(
-                    fn($title) => ['title' => $title],
-                    $listMemberMap[(int) $contactId]
-                );
             }
 
             $orgId = $contact['idOrganization'] ?? $contact['organizationId'] ?? null;
@@ -284,35 +287,7 @@ try {
         'changedSince' => $changedSince,
     ]);
 
-    // ── Step 2: Fetch list memberships (optional, before contacts) ─────
-
-    $listMemberMap = []; // contactId => [listTitle, ...]
-
-    if ($fetchLists) {
-        output("Fetching list memberships...");
-        $lists = $anabix->getLists();
-        $logger->info("Fetched lists", ['count' => count($lists)]);
-
-        foreach ($lists as $list) {
-            $listId = $list['idList'] ?? $list['id'] ?? null;
-            $listTitle = $list['title'] ?? $list['name'] ?? '';
-            if ($listId === null || $listTitle === '') {
-                continue;
-            }
-
-            $members = $anabix->getListMembers((int) $listId);
-            output("  List '{$listTitle}': " . count($members) . " members");
-            foreach ($members as $memberId) {
-                $listMemberMap[$memberId][] = $listTitle;
-            }
-
-            usleep(200000); // rate limiting
-        }
-
-        output("List memberships loaded for " . count($listMemberMap) . " contacts");
-    }
-
-    // ── Step 3: Load org cache (optional) ─────────────────────────────
+    // ── Step 2: Load org cache (optional) ───────────────────────────────
 
     $orgCache = [];
 
@@ -321,20 +296,26 @@ try {
         output("Org cache loaded: " . count($orgCache) . " entries");
     }
 
-    // ── Step 4: Fetch & process contacts page-by-page ─────────────────
+    // ── Step 3: Fetch & process contacts page-by-page ─────────────────
     //
     // Instead of loading all contacts into memory at once, we process
     // them in pages: fetch page → fetch missing orgs → transform → send batch.
+    // When fetchLists is enabled, we request fullInfo so contact lists
+    // (used as Ecomail tags) are included in the getAll response.
 
-    output("Fetching contacts from Anabix (page-by-page)...");
+    if ($fetchLists) {
+        output("Fetching contacts with list memberships (fullInfo)...");
+    } else {
+        output("Fetching contacts from Anabix (page-by-page)...");
+    }
 
     $subscribers = [];
     $batchNum = 0;
 
     $hasContacts = processContactPages(
-        $anabix->getContactsPaginated($changedSince),
+        $anabix->getContactsPaginated($changedSince, $fetchLists),
         $report, $subscribers, $batchNum, $orgCache,
-        $anabix, $ecomail, $transformer, $listMemberMap,
+        $anabix, $ecomail, $transformer,
         $fetchOrgs, $fetchDetail, $orgConcurrency, $batchSize
     );
 
@@ -345,9 +326,9 @@ try {
         $report['sync_mode'] = 'full_fallback';
 
         $hasContacts = processContactPages(
-            $anabix->getContactsPaginated(null),
+            $anabix->getContactsPaginated(null, $fetchLists),
             $report, $subscribers, $batchNum, $orgCache,
-            $anabix, $ecomail, $transformer, $listMemberMap,
+            $anabix, $ecomail, $transformer,
             $fetchOrgs, $fetchDetail, $orgConcurrency, $batchSize
         );
     }
