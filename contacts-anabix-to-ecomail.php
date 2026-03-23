@@ -22,10 +22,13 @@
 // ── Web compatibility: prevent proxy timeout ─────────────────────────
 set_time_limit(0);
 ini_set('max_execution_time', '0');
+ini_set('memory_limit', '512M');
 
 if (php_sapi_name() !== 'cli') {
+    // Disable all buffering so output reaches the proxy immediately
     header('Content-Type: text/plain; charset=utf-8');
     header('X-Accel-Buffering: no'); // nginx
+    header('Cache-Control: no-cache');
     ini_set('output_buffering', '0');
     ini_set('zlib.output_compression', '0');
     if (function_exists('apache_setenv')) {
@@ -35,6 +38,11 @@ if (php_sapi_name() !== 'cli') {
         ob_end_flush();
     }
     ob_implicit_flush(true);
+
+    // Apache mod_proxy buffers ~8KB before it starts forwarding.
+    // Send padding to fill that buffer so streaming begins immediately.
+    echo str_repeat(' ', 8192) . "\n";
+    flush();
 }
 
 require_once __DIR__ . '/src/env.php';
@@ -293,6 +301,7 @@ try {
             }
 
             $members = $anabix->getListMembers((int) $listId);
+            output("  List '{$listTitle}': " . count($members) . " members");
             foreach ($members as $memberId) {
                 $listMemberMap[$memberId][] = $listTitle;
             }
