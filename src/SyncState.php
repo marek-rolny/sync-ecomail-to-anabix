@@ -1,72 +1,102 @@
 <?php
 
 /**
- * Tracks which contacts have been synced to avoid duplicates.
- * Stores state as a JSON file with synced email addresses and last sync time.
+ * Manages sync state for delta synchronization.
+ *
+ * Stores the timestamp of the last successful sync run.
+ * On next run, only contacts changed after (lastSync - lookbackMinutes)
+ * are fetched, providing a safe overlap window.
+ *
+ * State is only saved when explicitly called (after a successful run).
  */
 class SyncState
 {
     private string $stateFile;
-    private array $state;
+    private ?string $lastSync;
 
-    public function __construct(string $stateDir)
+    public function __construct(string $stateFile)
     {
-        $stateDir = rtrim($stateDir, '/');
-        if (!is_dir($stateDir)) {
-            mkdir($stateDir, 0755, true);
+        $dir = dirname($stateFile);
+        if (!is_dir($dir)) {
+            mkdir($dir, 0755, true);
         }
 
-        $this->stateFile = "{$stateDir}/sync-state.json";
+        $this->stateFile = $stateFile;
         $this->load();
     }
 
     private function load(): void
     {
-        if (file_exists($this->stateFile)) {
-            $json = file_get_contents($this->stateFile);
-            $this->state = json_decode($json, true) ?: [];
-        } else {
-            $this->state = [
-                'synced_emails' => [],
-                'last_sync' => null,
-            ];
+        if (!file_exists($this->stateFile)) {
+            $this->lastSync = null;
+            return;
         }
+
+        $data = json_decode(file_get_contents($this->stateFile), true);
+        $this->lastSync = $data['last_sync'] ?? null;
     }
 
-    public function isSynced(string $email): bool
-    {
-        return in_array(strtolower($email), $this->state['synced_emails'] ?? [], true);
-    }
-
-    public function markSynced(string $email): void
-    {
-        $email = strtolower($email);
-        if (!in_array($email, $this->state['synced_emails'], true)) {
-            $this->state['synced_emails'][] = $email;
-        }
-    }
-
+    /**
+     * Get the last successful sync timestamp.
+     */
     public function getLastSync(): ?string
     {
-        return $this->state['last_sync'] ?? null;
+        return $this->lastSync;
     }
 
-    public function updateLastSync(): void
+    /**
+     * Calculate the "changed since" cutoff time.
+     *
+     * Decision tree:
+     *  1. If $forceSince is set and valid (not in future), use it
+     *  2. If lastSync exists, use (lastSync - lookbackMinutes)
+     *  3. Otherwise return null (full sync)
+     *
+     * @param string|null $forceSince      Override timestamp (from SYNC_FORCE_SINCE env)
+     * @param int         $lookbackMinutes Safety overlap window (default 60)
+     * @return string|null  ISO 8601 timestamp or null for full sync
+     */
+    public function getChangedSince(?string $forceSince = null, int $lookbackMinutes = 60): ?string
     {
-        $this->state['last_sync'] = date('c');
+        // Option 1: forced override
+        if ($forceSince !== null && $forceSince !== '') {
+            $ts = strtotime($forceSince);
+            if ($ts !== false && $ts <= time()) {
+                return date('c', $ts);
+            }
+        }
+
+        // Option 2: last sync with lookback
+        if ($this->lastSync !== null) {
+            $ts = strtotime($this->lastSync);
+            if ($ts !== false) {
+                return date('c', $ts - ($lookbackMinutes * 60));
+            }
+        }
+
+        // Option 3: full sync
+        return null;
     }
 
+    /**
+     * Record current time as the last sync timestamp.
+     * Does NOT persist — call save() after a successful run.
+     */
+    public function markCompleted(): void
+    {
+        $this->lastSync = date('c');
+    }
+
+    /**
+     * Persist the state to disk.
+     * Only call this after a fully successful sync (no failures).
+     */
     public function save(): void
     {
         file_put_contents(
             $this->stateFile,
-            json_encode($this->state, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE),
+            json_encode(['last_sync' => $this->lastSync], JSON_PRETTY_PRINT),
             LOCK_EX
         );
-    }
-
-    public function getSyncedCount(): int
-    {
-        return count($this->state['synced_emails'] ?? []);
     }
 }

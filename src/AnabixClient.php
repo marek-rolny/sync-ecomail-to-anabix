@@ -2,13 +2,19 @@
 
 /**
  * Client for Anabix CRM API.
- * Creates/updates contacts and manages group assignments.
  *
  * API: POST to https://{ACCOUNT}.anabix.cz/api
  * Auth: username + token in request body
- * Format: JSON with requestType, requestMethod, data
+ * Format: multipart/form-data with 'json' field containing JSON payload
  *
- * Reference: https://github.com/rotten77/anabix-api
+ * Supports:
+ *  - contacts: getAll (paginated, delta), get (detail)
+ *  - lists: getAll, getMembers
+ *  - organizations: get (single + parallel bulk via curl_multi)
+ *  - activities: create
+ *
+ * Retry: up to 3 attempts with exponential backoff on transient errors
+ * (5xx, 429, 408, cURL failures).
  */
 class AnabixClient
 {
@@ -16,6 +22,9 @@ class AnabixClient
     private string $token;
     private string $apiUrl;
     private Logger $logger;
+
+    private const MAX_RETRIES = 3;
+    private const RETRY_BASE_DELAY = 2; // seconds
 
     public function __construct(string $user, string $token, string $apiUrl, Logger $logger)
     {
@@ -25,10 +34,76 @@ class AnabixClient
         $this->logger = $logger;
     }
 
+    // ── Contacts ──────────────────────────────────────────────────────
+
+    /**
+     * Fetch contacts from Anabix, optionally filtered by changedSince.
+     *
+     * @param string|null $changedSince  ISO 8601 or Y-m-d H:i:s — only contacts changed after this time
+     * @return array  Flat list of contact arrays
+     */
+    public function getContacts(?string $changedSince = null): array
+    {
+        $all = [];
+        $page = 1;
+
+        while (true) {
+            $data = ['page' => $page];
+            if ($changedSince !== null) {
+                $data['changedSince'] = $changedSince;
+            }
+
+            $response = $this->request('contacts', 'getAll', $data);
+
+            if ($response === null) {
+                $this->logger->error("Failed to fetch contacts page", ['page' => $page]);
+                break;
+            }
+
+            $contacts = $this->extractList($response);
+
+            if (empty($contacts)) {
+                break;
+            }
+
+            foreach ($contacts as $contact) {
+                $all[] = $contact;
+            }
+
+            $this->logger->info("Fetched contacts page", [
+                'page' => $page,
+                'count' => count($contacts),
+                'total' => count($all),
+            ]);
+
+            $page++;
+
+            // Rate limiting
+            usleep(200000);
+        }
+
+        return $all;
+    }
+
+    /**
+     * Fetch a single contact by ID (full detail).
+     */
+    public function getContact(int $contactId): ?array
+    {
+        $response = $this->request('contacts', 'get', ['idContact' => $contactId]);
+
+        if ($response === null) {
+            return null;
+        }
+
+        // Response may contain the contact directly or nested under 'data'
+        return $response['data'] ?? $response;
+    }
+
     /**
      * Search for a contact by email.
      *
-     * @return array|null Contact data or null if not found
+     * Used by sync-sheets.php for Google Sheets → Anabix activity sync.
      */
     public function findContactByEmail(string $email): ?array
     {
@@ -37,128 +112,171 @@ class AnabixClient
         ]);
 
         if ($response === null) {
-            $this->logger->warning("findContactByEmail: API returned null", ['email' => $email]);
             return null;
         }
 
-        $this->logger->debug("findContactByEmail: raw response", [
-            'email' => $email,
-            'response_keys' => is_array($response) ? array_keys($response) : gettype($response),
-            'response' => $response,
-        ]);
+        $contacts = $this->extractList($response);
 
-        // Try to extract contact(s) from the response.
-        // Anabix API may return data in several formats:
-        //   {"error":false, "data": {"123": {contact...}, "456": {contact...}}}
-        //   {"error":false, "data": [{contact...}]}
-        //   {"error":false, "data": {single contact...}}
-        //   {"error":false, "123": {contact...}}  (contacts at top level)
-        //   or other variations
+        if (!empty($contacts)) {
+            return reset($contacts);
+        }
 
-        // 1) Try $response['data']
+        // Fallback: single contact might be directly in 'data'
         $data = $response['data'] ?? null;
-
-        if (is_array($data) && !empty($data)) {
-            $first = reset($data);
-            // If data contains nested arrays (list of contacts), return first
-            if (is_array($first)) {
-                return $first;
-            }
-            // If data itself looks like a single contact (has idContact or email key)
-            if (isset($data['idContact']) || isset($data['id']) || isset($data['email'])) {
-                return $data;
-            }
-            // Data contains scalar values keyed by field names - might be a contact
+        if (is_array($data) && (isset($data['idContact']) || isset($data['email']))) {
             return $data;
         }
-
-        // 2) Try top-level response (minus error/message keys)
-        $filtered = array_filter($response, function ($value, $key) {
-            return !in_array($key, ['error', 'message', 'data'], true) && is_array($value);
-        }, ARRAY_FILTER_USE_BOTH);
-
-        if (!empty($filtered)) {
-            $first = reset($filtered);
-            if (is_array($first)) {
-                return $first;
-            }
-        }
-
-        $this->logger->warning("findContactByEmail: contact not found", [
-            'email' => $email,
-        ]);
 
         return null;
     }
 
-    /**
-     * Create a new contact in Anabix.
-     *
-     * @param array $contactData Fields: firstName, lastName, email, phone, etc.
-     * @return array|null Created contact data or null on failure
-     */
-    public function createContact(array $contactData): ?array
-    {
-        $this->logger->info("Creating Anabix contact", ['email' => $contactData['email'] ?? 'unknown']);
+    // ── Lists ─────────────────────────────────────────────────────────
 
-        $response = $this->request('contacts', 'create', $contactData);
+    /**
+     * Fetch all lists (groups/categories) from Anabix.
+     *
+     * @return array  List of ['idList' => ..., 'title' => ...] arrays
+     */
+    public function getLists(): array
+    {
+        $response = $this->request('lists', 'getAll');
 
         if ($response === null) {
-            $this->logger->error("Failed to create Anabix contact", ['data' => $contactData]);
+            return [];
+        }
+
+        return $this->extractList($response);
+    }
+
+    /**
+     * Fetch member contact IDs for a specific list.
+     *
+     * @return int[]  Array of contact IDs belonging to the list
+     */
+    public function getListMembers(int $listId): array
+    {
+        $response = $this->request('lists', 'getMembers', ['idList' => $listId]);
+
+        if ($response === null) {
+            return [];
+        }
+
+        // Response may be a flat list of IDs or list of objects
+        $data = $this->extractList($response);
+        $ids = [];
+
+        foreach ($data as $item) {
+            if (is_numeric($item)) {
+                $ids[] = (int) $item;
+            } elseif (is_array($item)) {
+                $id = $item['idContact'] ?? $item['id'] ?? null;
+                if ($id !== null) {
+                    $ids[] = (int) $id;
+                }
+            }
+        }
+
+        return $ids;
+    }
+
+    // ── Organizations ─────────────────────────────────────────────────
+
+    /**
+     * Fetch a single organization by ID.
+     */
+    public function getOrganization(int $orgId): ?array
+    {
+        $response = $this->request('organizations', 'get', ['idOrganization' => $orgId]);
+
+        if ($response === null) {
             return null;
         }
 
-        return $response;
+        return $response['data'] ?? $response;
     }
 
     /**
-     * Update an existing contact.
+     * Fetch multiple organizations in parallel using curl_multi.
      *
-     * @param int $contactId The Anabix contact ID
-     * @param array $contactData Fields to update
-     * @return array|null Updated contact data or null on failure
+     * @param int[] $orgIds         Organization IDs to fetch
+     * @param int   $concurrency    Max parallel requests
+     * @return array  Map of orgId => organization data
      */
-    public function updateContact(int $contactId, array $contactData): ?array
+    public function getOrganizationsParallel(array $orgIds, int $concurrency = 20): array
     {
-        $contactData['idContact'] = $contactId;
-
-        $this->logger->info("Updating Anabix contact", ['id' => $contactId]);
-
-        $response = $this->request('contacts', 'update', $contactData);
-
-        if ($response === null) {
-            $this->logger->error("Failed to update Anabix contact", ['id' => $contactId]);
-            return null;
+        if (empty($orgIds)) {
+            return [];
         }
 
-        return $response;
+        $results = [];
+        $chunks = array_chunk($orgIds, $concurrency);
+
+        foreach ($chunks as $chunk) {
+            $multiHandle = curl_multi_init();
+            $handles = [];
+
+            foreach ($chunk as $orgId) {
+                $payload = json_encode([
+                    'username' => $this->user,
+                    'token' => $this->token,
+                    'requestType' => 'organizations',
+                    'requestMethod' => 'get',
+                    'data' => ['idOrganization' => $orgId],
+                ], JSON_UNESCAPED_UNICODE);
+
+                $ch = curl_init();
+                curl_setopt_array($ch, [
+                    CURLOPT_URL => $this->apiUrl,
+                    CURLOPT_POST => true,
+                    CURLOPT_POSTFIELDS => ['json' => $payload],
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_TIMEOUT => 30,
+                    CURLOPT_CONNECTTIMEOUT => 10,
+                ]);
+
+                curl_multi_add_handle($multiHandle, $ch);
+                $handles[$orgId] = $ch;
+            }
+
+            // Execute all requests
+            do {
+                $status = curl_multi_exec($multiHandle, $active);
+                curl_multi_select($multiHandle);
+            } while ($active > 0 && $status === CURLM_OK);
+
+            // Collect results
+            foreach ($handles as $orgId => $ch) {
+                $body = curl_multi_getcontent($ch);
+                $response = json_decode($body, true);
+
+                if ($response !== null && empty($response['error'])) {
+                    $org = $response['data'] ?? $response;
+                    if (is_array($org) && !empty($org)) {
+                        $results[$orgId] = $org;
+                    }
+                }
+
+                curl_multi_remove_handle($multiHandle, $ch);
+                curl_close($ch);
+            }
+
+            curl_multi_close($multiHandle);
+
+            $this->logger->info("Fetched organizations batch", [
+                'requested' => count($chunk),
+                'received' => count(array_intersect_key($results, array_flip($chunk))),
+            ]);
+        }
+
+        return $results;
     }
 
-    /**
-     * Add a contact to a group.
-     *
-     * @param int $contactId The Anabix contact ID
-     * @param int $groupId The Anabix group ID
-     */
-    public function addContactToGroup(int $contactId, int $groupId): ?array
-    {
-        $this->logger->info("Adding contact to group", ['contact' => $contactId, 'group' => $groupId]);
-
-        return $this->request('contacts', 'addToGroup', [
-            'idContact' => $contactId,
-            'idGroup' => $groupId,
-        ]);
-    }
+    // ── Activities ────────────────────────────────────────────────────
 
     /**
      * Create an activity on a contact.
      *
-     * @param int $contactId The Anabix contact ID
-     * @param string $title Activity title
-     * @param string $body Activity description
-     * @param string $type Activity type (e.g. 'note', 'email', 'call')
-     * @param string|null $timestamp Activity date (Y-m-d H:i:s), defaults to now
-     * @param int|null $idUser Activity owner user ID (e.g. 5 for Robot Karel)
+     * Used by sync-sheets.php and activities-ecomail-to-anabix.php.
      */
     public function createActivity(
         int $contactId,
@@ -168,7 +286,6 @@ class AnabixClient
         ?string $timestamp = null,
         ?int $idUser = null
     ): ?array {
-        // Anabix API expects Unix timestamp (integer), not datetime string
         if ($timestamp !== null) {
             $unixTimestamp = is_numeric($timestamp) ? (int) $timestamp : strtotime($timestamp);
         } else {
@@ -187,38 +304,66 @@ class AnabixClient
             $data['idUser'] = $idUser;
         }
 
-        $this->logger->info("Creating Anabix activity", [
+        $this->logger->info("Creating activity", [
             'contact' => $contactId,
+            'type' => $type,
             'title' => $title,
-            'idUser' => $idUser,
         ]);
 
-        $response = $this->request('activities', 'create', $data);
-
-        if ($response === null) {
-            $this->logger->error("Failed to create Anabix activity", [
-                'contact' => $contactId,
-                'title' => $title,
-            ]);
-            echo "[DEBUG] createActivity FAILED for contact #{$contactId} - check log for details" . PHP_EOL;
-        }
-
-        return $response;
+        return $this->request('activities', 'create', $data);
     }
 
-    /** @var int Counter for debug output - show details for first N API calls */
-    private int $debugCallCount = 0;
-    private const DEBUG_FIRST_N_CALLS = 10;
+    // ── Internal ──────────────────────────────────────────────────────
 
     /**
-     * Send a request to the Anabix API.
+     * Extract a flat list of items from an Anabix API response.
+     *
+     * Anabix responses come in many shapes:
+     *   {"data": {"123": {...}, "456": {...}}}
+     *   {"data": [{...}, {...}]}
+     *   {"123": {...}, "456": {...}}  (items at top level)
+     */
+    private function extractList(array $response): array
+    {
+        // Try 'data' key first
+        $data = $response['data'] ?? null;
+
+        if (is_array($data) && !empty($data)) {
+            $first = reset($data);
+            if (is_array($first)) {
+                return array_values($data);
+            }
+            // Single item that looks like a record
+            if (isset($data['idContact']) || isset($data['idList']) || isset($data['idOrganization'])) {
+                return [$data];
+            }
+        }
+
+        // Try common alternative keys
+        foreach (['contacts', 'items', 'records', 'lists', 'members'] as $key) {
+            if (isset($response[$key]) && is_array($response[$key])) {
+                return array_values($response[$key]);
+            }
+        }
+
+        // Try top-level (minus metadata keys)
+        $filtered = array_filter($response, function ($value, $key) {
+            return !in_array($key, ['error', 'message', 'data', 'status', 'page', 'pages'], true)
+                && is_array($value);
+        }, ARRAY_FILTER_USE_BOTH);
+
+        if (!empty($filtered)) {
+            return array_values($filtered);
+        }
+
+        return [];
+    }
+
+    /**
+     * Send a request to the Anabix API with retry on transient errors.
      */
     private function request(string $requestType, string $requestMethod, array $data = []): ?array
     {
-        $this->debugCallCount++;
-        $showDebug = $this->debugCallCount <= self::DEBUG_FIRST_N_CALLS;
-
-        // Anabix API expects multipart/form-data with a 'json' field
         $payload = json_encode([
             'username' => $this->user,
             'token' => $this->token,
@@ -227,74 +372,87 @@ class AnabixClient
             'data' => $data,
         ], JSON_UNESCAPED_UNICODE);
 
-        if ($showDebug) {
-            echo "[DEBUG] API request #{$this->debugCallCount}: {$requestType}/{$requestMethod} -> {$this->apiUrl}" . PHP_EOL;
-            echo "[DEBUG] credentials: user=" . (empty($this->user) ? '(EMPTY)' : substr($this->user, 0, 3) . '***') . " token=" . (empty($this->token) ? '(EMPTY)' : substr($this->token, 0, 4) . '***') . PHP_EOL;
-        }
+        for ($attempt = 1; $attempt <= self::MAX_RETRIES; $attempt++) {
+            $ch = curl_init();
+            curl_setopt_array($ch, [
+                CURLOPT_URL => $this->apiUrl,
+                CURLOPT_POST => true,
+                CURLOPT_POSTFIELDS => ['json' => $payload],
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT => 30,
+                CURLOPT_CONNECTTIMEOUT => 10,
+            ]);
 
-        $ch = curl_init();
-        curl_setopt_array($ch, [
-            CURLOPT_URL => $this->apiUrl,
-            CURLOPT_POST => true,
-            CURLOPT_POSTFIELDS => ['json' => $payload],
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT => 30,
-            CURLOPT_CONNECTTIMEOUT => 10,
-        ]);
+            $responseBody = curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $error = curl_error($ch);
+            curl_close($ch);
 
-        $responseBody = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $error = curl_error($ch);
-        curl_close($ch);
-
-        if ($error) {
-            if ($showDebug) {
-                echo "[DEBUG] API cURL ERROR: {$error}" . PHP_EOL;
+            // cURL transport error
+            if ($error) {
+                $this->logger->warning("Anabix API cURL error (attempt {$attempt})", [
+                    'error' => $error,
+                    'type' => $requestType,
+                    'method' => $requestMethod,
+                ]);
+                if ($attempt < self::MAX_RETRIES) {
+                    sleep(self::RETRY_BASE_DELAY ** $attempt);
+                    continue;
+                }
+                $this->logger->error("Anabix API cURL error after all retries", ['error' => $error]);
+                return null;
             }
-            $this->logger->error("Anabix API curl error", [
-                'error' => $error,
-                'type' => $requestType,
-                'method' => $requestMethod,
-            ]);
-            return null;
-        }
 
-        if ($showDebug) {
-            echo "[DEBUG] API response (HTTP {$httpCode}): " . mb_substr($responseBody, 0, 500) . PHP_EOL;
-        }
-
-        $response = json_decode($responseBody, true);
-
-        if ($response === null) {
-            if ($showDebug) {
-                echo "[DEBUG] API invalid JSON!" . PHP_EOL;
+            // Transient HTTP errors — retry
+            if (in_array($httpCode, [408, 429, 500, 502, 503, 504], true)) {
+                $this->logger->warning("Anabix API transient HTTP error (attempt {$attempt})", [
+                    'http_code' => $httpCode,
+                    'type' => $requestType,
+                    'method' => $requestMethod,
+                ]);
+                if ($attempt < self::MAX_RETRIES) {
+                    sleep(self::RETRY_BASE_DELAY ** $attempt);
+                    continue;
+                }
+                $this->logger->error("Anabix API HTTP error after all retries", ['http_code' => $httpCode]);
+                return null;
             }
-            $this->logger->error("Anabix API invalid JSON response", [
-                'http_code' => $httpCode,
-                'response' => $responseBody,
-            ]);
-            return null;
+
+            // Non-transient HTTP error
+            if ($httpCode < 200 || $httpCode >= 300) {
+                $this->logger->error("Anabix API HTTP error", [
+                    'http_code' => $httpCode,
+                    'response' => mb_substr($responseBody, 0, 500),
+                ]);
+                return null;
+            }
+
+            // Parse JSON
+            $response = json_decode($responseBody, true);
+            if ($response === null) {
+                $this->logger->error("Anabix API invalid JSON", [
+                    'response' => mb_substr($responseBody, 0, 500),
+                ]);
+                return null;
+            }
+
+            // API-level error
+            $isError = (isset($response['error']) && $response['error'])
+                || (isset($response['status']) && strtoupper($response['status']) === 'ERROR');
+
+            if ($isError) {
+                $errorMessage = $response['message'] ?? $response['data'] ?? 'Unknown error';
+                $this->logger->error("Anabix API error", [
+                    'message' => $errorMessage,
+                    'type' => $requestType,
+                    'method' => $requestMethod,
+                ]);
+                return null;
+            }
+
+            return $response;
         }
 
-        // Check for API-level error in the response
-        // Anabix API returns errors in two formats:
-        //   {"error": true, "message": "..."} or {"status": "ERROR", "data": "..."}
-        $isError = (isset($response['error']) && $response['error'])
-            || (isset($response['status']) && strtoupper($response['status']) === 'ERROR');
-
-        if ($isError) {
-            $errorMessage = $response['message'] ?? $response['data'] ?? '';
-            // Always show API errors, not just for first N calls
-            echo "[DEBUG] API error ({$requestType}/{$requestMethod}): " . $errorMessage . PHP_EOL;
-            $this->logger->error("Anabix API returned error", [
-                'error' => $response['error'] ?? $response['status'] ?? 'unknown',
-                'message' => $errorMessage,
-                'type' => $requestType,
-                'method' => $requestMethod,
-            ]);
-            return null;
-        }
-
-        return $response;
+        return null;
     }
 }

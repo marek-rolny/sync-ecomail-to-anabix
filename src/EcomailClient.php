@@ -2,105 +2,223 @@
 
 /**
  * Client for Ecomail API v2.
- * Fetches subscribers from a specific list.
  *
  * API docs: https://ecomailczv2.docs.apiary.io/
- * Auth: key header with API key
- * Base URL: https://api2.ecomail.cz
+ * Auth: 'key' header with API key
+ * Base URL: https://api2.ecomailapp.cz
+ *
+ * Primary operation: bulk subscribe/upsert contacts into a list.
+ * Also supports reading campaigns and subscriber events for activity sync.
  */
 class EcomailClient
 {
     private string $apiKey;
     private string $baseUrl;
+    private int $listId;
     private Logger $logger;
+    private bool $triggerAutoresponders;
+    private bool $resubscribe;
 
-    public function __construct(string $apiKey, string $baseUrl, Logger $logger)
-    {
+    public function __construct(
+        string $apiKey,
+        string $baseUrl,
+        int $listId,
+        Logger $logger,
+        bool $triggerAutoresponders = false,
+        bool $resubscribe = false
+    ) {
         $this->apiKey = $apiKey;
         $this->baseUrl = rtrim($baseUrl, '/');
+        $this->listId = $listId;
         $this->logger = $logger;
+        $this->triggerAutoresponders = $triggerAutoresponders;
+        $this->resubscribe = $resubscribe;
     }
 
+    // ── Bulk subscribe (contacts sync) ────────────────────────────────
+
     /**
-     * Fetch all subscribers from a list, paginating through all pages.
+     * Bulk upsert contacts into the configured Ecomail list.
      *
-     * @return array List of subscriber arrays with keys: email, name, surname, status, etc.
+     * Uses POST /lists/{listId}/subscribe-bulk.
+     * Sends update_existing=true so existing contacts get updated.
+     *
+     * @param array[] $subscribers  Array of subscriber payloads (from Transformer)
+     * @return array  ['imported' => int, 'updated' => int, 'failed' => int, 'errors' => string[]]
      */
-    public function getAllSubscribers(int $listId, int $pageSize = 20): array
+    public function bulkUpsertContacts(array $subscribers): array
     {
-        $allSubscribers = [];
-        $page = 1;
+        $result = [
+            'imported' => 0,
+            'updated' => 0,
+            'failed' => 0,
+            'errors' => [],
+        ];
 
-        while (true) {
-            $this->logger->info("Fetching Ecomail subscribers", [
-                'list_id' => $listId,
-                'page' => $page,
-            ]);
-
-            $response = $this->get("/lists/{$listId}/subscribers", ['page' => $page]);
-
-            if ($response === null) {
-                $this->logger->error("Failed to fetch subscribers page", ['page' => $page]);
-                break;
-            }
-
-            // The API returns either data directly or nested under 'data'
-            $subscribers = $response['data'] ?? $response;
-
-            if (!is_array($subscribers) || empty($subscribers)) {
-                break;
-            }
-
-            foreach ($subscribers as $subscriber) {
-                // Normalize: subscribers may be nested under 'subscriber_data'
-                $data = $subscriber['subscriber_data'] ?? $subscriber;
-                $allSubscribers[] = $data;
-            }
-
-            // Check pagination
-            $lastPage = $response['last_page'] ?? $response['meta']['last_page'] ?? $page;
-            if ($page >= $lastPage) {
-                break;
-            }
-
-            $page++;
+        if (empty($subscribers)) {
+            return $result;
         }
 
-        $this->logger->info("Fetched total Ecomail subscribers", ['count' => count($allSubscribers)]);
-        return $allSubscribers;
+        $payload = [
+            'subscriber_data' => $subscribers,
+            'update_existing' => true,
+            'skip_confirmation' => true,
+        ];
+
+        if ($this->triggerAutoresponders) {
+            $payload['trigger_autoresponders'] = true;
+        }
+
+        if ($this->resubscribe) {
+            $payload['resubscribe'] = true;
+        }
+
+        $response = $this->post("/lists/{$this->listId}/subscribe-bulk", $payload);
+
+        if ($response === null) {
+            $result['failed'] = count($subscribers);
+            $result['errors'][] = 'API request failed';
+            return $result;
+        }
+
+        // Parse response — Ecomail may return counts or just status
+        $result['imported'] = $response['inserted'] ?? $response['imported'] ?? 0;
+        $result['updated'] = $response['updated'] ?? 0;
+
+        // If no counts returned, assume success for the whole batch
+        if ($result['imported'] === 0 && $result['updated'] === 0) {
+            $result['imported'] = count($subscribers);
+        }
+
+        $this->logger->info("Bulk upsert completed", [
+            'sent' => count($subscribers),
+            'imported' => $result['imported'],
+            'updated' => $result['updated'],
+        ]);
+
+        return $result;
     }
 
+    // ── Campaigns (for activity sync) ─────────────────────────────────
+
     /**
-     * Fetch a single subscriber by email from a list.
+     * List campaigns, optionally filtered by status.
+     *
+     * @return array[]  List of campaign arrays
      */
-    public function getSubscriber(int $listId, string $email): ?array
+    public function getCampaigns(?string $status = null): array
     {
-        $email = urlencode($email);
-        $response = $this->get("/lists/{$listId}/subscriber/{$email}");
-        return $response;
+        $params = [];
+        if ($status !== null) {
+            $params['status'] = $status;
+        }
+
+        $response = $this->get('/campaigns', $params);
+
+        return $response['data'] ?? $response ?? [];
     }
 
     /**
-     * GET request to Ecomail API.
+     * Get a single campaign detail.
      */
+    public function getCampaign(int $campaignId): ?array
+    {
+        return $this->get("/campaigns/{$campaignId}");
+    }
+
+    /**
+     * Get subscriber events for a campaign (sends, opens, clicks, bounces, etc.).
+     *
+     * @return array[]  List of event arrays
+     */
+    public function getCampaignEvents(int $campaignId): array
+    {
+        $response = $this->get("/campaigns/{$campaignId}/response");
+
+        return $response['data'] ?? $response ?? [];
+    }
+
+    /**
+     * Get subscriber detail by email (for reading custom fields like anabixId).
+     */
+    public function getSubscriber(string $email): ?array
+    {
+        $encoded = urlencode($email);
+        $response = $this->get("/lists/{$this->listId}/subscriber/{$encoded}");
+
+        if ($response === null) {
+            return null;
+        }
+
+        return $response['subscriber'] ?? $response['data'] ?? $response;
+    }
+
+    /**
+     * Get email log for a subscriber.
+     *
+     * API: GET /lists/{list_id}/subscriber/{email}/email-log
+     * @see https://docs.ecomail.cz/api-reference/subscribers/email-log
+     *
+     * Returns array of log entries with fields:
+     *   campaign_id, autoresponder_id, action_id, event, msg, url,
+     *   email, occured_at, mail_name
+     *
+     * Events: send, open, click, hard_bounce, soft_bounce,
+     *         out_of_band, unsub, spam, spam_complaint
+     *
+     * @return array[]  List of email log entries
+     */
+    public function getSubscriberEmailLog(string $email): array
+    {
+        $encoded = urlencode($email);
+        $response = $this->get("/lists/{$this->listId}/subscriber/{$encoded}/email-log");
+
+        if ($response === null) {
+            return [];
+        }
+
+        return $response['data'] ?? $response['events'] ?? $response ?? [];
+    }
+
+    // ── HTTP methods ──────────────────────────────────────────────────
+
+    private function post(string $endpoint, array $data): ?array
+    {
+        return $this->httpRequest('POST', $endpoint, $data);
+    }
+
     private function get(string $endpoint, array $params = []): ?array
     {
+        return $this->httpRequest('GET', $endpoint, $params);
+    }
+
+    private function httpRequest(string $method, string $endpoint, array $data = []): ?array
+    {
         $url = $this->baseUrl . $endpoint;
-        if (!empty($params)) {
-            $url .= '?' . http_build_query($params);
-        }
 
         $ch = curl_init();
-        curl_setopt_array($ch, [
-            CURLOPT_URL => $url,
+        $options = [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_HTTPHEADER => [
                 'key: ' . $this->apiKey,
                 'Content-Type: application/json',
             ],
-            CURLOPT_TIMEOUT => 30,
-            CURLOPT_CONNECTTIMEOUT => 10,
-        ]);
+            CURLOPT_TIMEOUT => 60,
+            CURLOPT_CONNECTTIMEOUT => 15,
+        ];
+
+        if ($method === 'POST') {
+            $options[CURLOPT_URL] = $url;
+            $options[CURLOPT_POST] = true;
+            $options[CURLOPT_POSTFIELDS] = json_encode($data, JSON_UNESCAPED_UNICODE);
+        } else {
+            if (!empty($data)) {
+                $url .= '?' . http_build_query($data);
+            }
+            $options[CURLOPT_URL] = $url;
+        }
+
+        curl_setopt_array($ch, $options);
 
         $responseBody = curl_exec($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -108,25 +226,58 @@ class EcomailClient
         curl_close($ch);
 
         if ($error) {
-            $this->logger->error("Ecomail API curl error", ['error' => $error, 'url' => $url]);
+            $this->logger->error("Ecomail cURL error", ['error' => $error, 'url' => $url]);
             return null;
         }
 
+        // Rate limit — wait and retry once
         if ($httpCode === 429) {
-            $this->logger->warning("Ecomail API rate limit hit, waiting 60s");
+            $this->logger->warning("Ecomail rate limit hit, waiting 60s");
             sleep(60);
-            return $this->get($endpoint, $params);
+            return $this->httpRequest($method, $endpoint, $data);
         }
 
         if ($httpCode < 200 || $httpCode >= 300) {
-            $this->logger->error("Ecomail API error", [
+            $this->logger->error("Ecomail HTTP error", [
                 'http_code' => $httpCode,
-                'response' => $responseBody,
-                'url' => $url,
+                'response' => $this->parseErrorMessage($responseBody),
+                'endpoint' => $endpoint,
             ]);
             return null;
         }
 
-        return json_decode($responseBody, true);
+        $response = json_decode($responseBody, true);
+
+        if ($response === null && $responseBody !== '') {
+            $this->logger->error("Ecomail invalid JSON", [
+                'response' => mb_substr($responseBody, 0, 500),
+            ]);
+            return null;
+        }
+
+        return $response ?? [];
+    }
+
+    /**
+     * Try to extract a human-readable error message from an API error body.
+     */
+    private function parseErrorMessage(string $body): string
+    {
+        $decoded = json_decode($body, true);
+
+        if ($decoded === null) {
+            return mb_substr($body, 0, 300);
+        }
+
+        // Common Ecomail error formats
+        if (isset($decoded['message'])) {
+            return $decoded['message'];
+        }
+
+        if (isset($decoded['error'])) {
+            return is_string($decoded['error']) ? $decoded['error'] : json_encode($decoded['error']);
+        }
+
+        return mb_substr($body, 0, 300);
     }
 }
