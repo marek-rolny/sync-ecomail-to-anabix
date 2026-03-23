@@ -19,6 +19,24 @@
  * Can be run from cron or manually. Returns JSON report.
  */
 
+// ── Web compatibility: prevent proxy timeout ─────────────────────────
+set_time_limit(0);
+ini_set('max_execution_time', '0');
+
+if (php_sapi_name() !== 'cli') {
+    header('Content-Type: text/plain; charset=utf-8');
+    header('X-Accel-Buffering: no'); // nginx
+    ini_set('output_buffering', '0');
+    ini_set('zlib.output_compression', '0');
+    if (function_exists('apache_setenv')) {
+        apache_setenv('no-gzip', '1');
+    }
+    while (ob_get_level()) {
+        ob_end_flush();
+    }
+    ob_implicit_flush(true);
+}
+
 require_once __DIR__ . '/src/env.php';
 require_once __DIR__ . '/src/Logger.php';
 require_once __DIR__ . '/src/SyncState.php';
@@ -30,7 +48,7 @@ require_once __DIR__ . '/src/Transformer.php';
 
 $envFile = __DIR__ . '/.env';
 if (!file_exists($envFile)) {
-    fwrite(STDERR, "Error: .env file not found. Copy .env.example to .env and configure it.\n");
+    echo "Error: .env file not found. Copy .env.example to .env and configure it.\n";
     exit(1);
 }
 loadEnv($envFile);
@@ -40,7 +58,7 @@ loadEnv($envFile);
 $required = ['ANABIX_USERNAME', 'ANABIX_TOKEN', 'ANABIX_API_URL', 'ECOMAIL_API_KEY', 'ECOMAIL_LIST_ID'];
 foreach ($required as $var) {
     if (env($var) === '') {
-        fwrite(STDERR, "Error: {$var} is not set in .env\n");
+        echo "Error: {$var} is not set in .env\n";
         exit(1);
     }
 }
@@ -117,6 +135,9 @@ function output(string $msg): void
 {
     $time = date('H:i:s');
     echo "[{$time}] {$msg}" . PHP_EOL;
+    if (php_sapi_name() !== 'cli') {
+        flush();
+    }
 }
 
 /**
