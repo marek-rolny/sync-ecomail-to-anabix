@@ -111,12 +111,114 @@ $batchSize = (int) env('ECOMAIL_BATCH_SIZE', '500');
 $lookbackMinutes = (int) env('SYNC_LOOKBACK_MINUTES', '60');
 $forceSince = env('SYNC_FORCE_SINCE', '') ?: null;
 
-// ── Helper ────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────
 
 function output(string $msg): void
 {
     $time = date('H:i:s');
     echo "[{$time}] {$msg}" . PHP_EOL;
+}
+
+/**
+ * Process contact pages from a generator: transform and send to Ecomail in batches.
+ *
+ * Modifies $report, $orgCache, $subscribers, $batchNum by reference.
+ * Returns true if any contacts were processed.
+ */
+function processContactPages(
+    \Generator $pages,
+    array &$report,
+    array &$subscribers,
+    int &$batchNum,
+    array &$orgCache,
+    AnabixClient $anabix,
+    EcomailClient $ecomail,
+    Transformer $transformer,
+    array $listMemberMap,
+    bool $fetchOrgs,
+    bool $fetchDetail,
+    int $orgConcurrency,
+    int $batchSize
+): bool {
+    $hasContacts = false;
+
+    foreach ($pages as $pageContacts) {
+        $hasContacts = true;
+        $report['contacts_fetched'] += count($pageContacts);
+
+        // Fetch missing organizations for this page
+        if ($fetchOrgs) {
+            $neededOrgIds = [];
+            foreach ($pageContacts as $c) {
+                $orgId = $c['idOrganization'] ?? $c['organizationId'] ?? null;
+                if ($orgId !== null && (int) $orgId > 0 && !isset($orgCache[(int) $orgId])) {
+                    $neededOrgIds[(int) $orgId] = true;
+                }
+            }
+            $neededOrgIds = array_keys($neededOrgIds);
+
+            if (!empty($neededOrgIds)) {
+                $fetched = $anabix->getOrganizationsParallel($neededOrgIds, $orgConcurrency);
+                foreach ($fetched as $orgId => $orgData) {
+                    $orgCache[$orgId] = $orgData;
+                }
+            }
+        }
+
+        // Transform contacts from this page
+        foreach ($pageContacts as $contact) {
+            $contactId = $contact['idContact'] ?? $contact['id'] ?? null;
+
+            if ($fetchDetail && $contactId !== null) {
+                $detail = $anabix->getContact((int) $contactId);
+                if ($detail !== null) {
+                    $contact = array_merge($contact, $detail);
+                }
+                usleep(200000);
+            }
+
+            if ($contactId !== null && empty($contact['lists']) && isset($listMemberMap[(int) $contactId])) {
+                $contact['lists'] = array_map(
+                    fn($title) => ['title' => $title],
+                    $listMemberMap[(int) $contactId]
+                );
+            }
+
+            $orgId = $contact['idOrganization'] ?? $contact['organizationId'] ?? null;
+            $org = ($orgId !== null && isset($orgCache[(int) $orgId])) ? $orgCache[(int) $orgId] : null;
+
+            $subscriber = $transformer->transform($contact, $org);
+
+            if ($subscriber === null) {
+                $report['skipped']++;
+                continue;
+            }
+
+            $subscribers[] = $subscriber;
+
+            // Send batch when we have enough subscribers
+            if (count($subscribers) >= $batchSize) {
+                $batchNum++;
+                $report['transformed'] += count($subscribers);
+                output("  Batch {$batchNum} (" . count($subscribers) . " subscribers)");
+
+                $result = $ecomail->bulkUpsertContacts($subscribers);
+                $report['imported'] += $result['imported'];
+                $report['updated'] += $result['updated'];
+                $report['failed'] += $result['failed'];
+                foreach ($result['errors'] as $err) {
+                    $report['errors'][] = "Batch {$batchNum}: {$err}";
+                }
+
+                $subscribers = []; // free memory
+                sleep(2); // rate limiting
+            }
+        }
+
+        output("Processed page — total fetched: {$report['contacts_fetched']}");
+    }
+
+    return $hasContacts;
 }
 
 // ── Run sync ──────────────────────────────────────────────────────────
@@ -153,29 +255,7 @@ try {
         'changedSince' => $changedSince,
     ]);
 
-    // ── Step 2: Fetch contacts from Anabix ────────────────────────────
-
-    output("Fetching contacts from Anabix...");
-    $contacts = $anabix->getContacts($changedSince);
-
-    // Fallback: delta returned 0 → try full export
-    if (empty($contacts) && $changedSince !== null) {
-        output("Delta returned 0 contacts, falling back to full export...");
-        $logger->info("Delta empty, falling back to full export");
-        $contacts = $anabix->getContacts(null);
-        $report['sync_mode'] = 'full_fallback';
-    }
-
-    $report['contacts_fetched'] = count($contacts);
-    output("Fetched: {$report['contacts_fetched']} contacts");
-
-    if (empty($contacts)) {
-        output("No contacts to sync.");
-        $report['status'] = 'ok';
-        goto finish;
-    }
-
-    // ── Step 3: Fetch list memberships (optional) ─────────────────────
+    // ── Step 2: Fetch list memberships (optional, before contacts) ─────
 
     $listMemberMap = []; // contactId => [listTitle, ...]
 
@@ -202,122 +282,85 @@ try {
         output("List memberships loaded for " . count($listMemberMap) . " contacts");
     }
 
-    // ── Step 4: Fetch organizations (optional, cached) ────────────────
+    // ── Step 3: Load org cache (optional) ─────────────────────────────
 
     $orgCache = [];
 
-    if ($fetchOrgs) {
-        // Load existing cache
-        if (file_exists($orgCacheFile)) {
-            $orgCache = json_decode(file_get_contents($orgCacheFile), true) ?: [];
-        }
-
-        // Collect unique org IDs from contacts
-        $neededOrgIds = [];
-        foreach ($contacts as $c) {
-            $orgId = $c['idOrganization'] ?? $c['organizationId'] ?? null;
-            if ($orgId !== null && (int) $orgId > 0 && !isset($orgCache[(int) $orgId])) {
-                $neededOrgIds[(int) $orgId] = true;
-            }
-        }
-        $neededOrgIds = array_keys($neededOrgIds);
-
-        if (!empty($neededOrgIds)) {
-            output("Fetching " . count($neededOrgIds) . " organizations (parallel)...");
-            $fetched = $anabix->getOrganizationsParallel($neededOrgIds, $orgConcurrency);
-
-            // Merge into cache and save
-            foreach ($fetched as $orgId => $orgData) {
-                $orgCache[$orgId] = $orgData;
-            }
-
-            $cacheDir = dirname($orgCacheFile);
-            if (!is_dir($cacheDir)) {
-                mkdir($cacheDir, 0755, true);
-            }
-            file_put_contents(
-                $orgCacheFile,
-                json_encode($orgCache, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE),
-                LOCK_EX
-            );
-
-            output("Org cache updated: " . count($orgCache) . " total");
-        } else {
-            output("All organizations in cache (" . count($orgCache) . ")");
-        }
+    if ($fetchOrgs && file_exists($orgCacheFile)) {
+        $orgCache = json_decode(file_get_contents($orgCacheFile), true) ?: [];
+        output("Org cache loaded: " . count($orgCache) . " entries");
     }
 
-    // ── Step 5: Transform contacts ────────────────────────────────────
+    // ── Step 4: Fetch & process contacts page-by-page ─────────────────
+    //
+    // Instead of loading all contacts into memory at once, we process
+    // them in pages: fetch page → fetch missing orgs → transform → send batch.
 
-    output("Transforming contacts...");
+    output("Fetching contacts from Anabix (page-by-page)...");
+
     $subscribers = [];
+    $batchNum = 0;
 
-    foreach ($contacts as $contact) {
-        $contactId = $contact['idContact'] ?? $contact['id'] ?? null;
+    $hasContacts = processContactPages(
+        $anabix->getContactsPaginated($changedSince),
+        $report, $subscribers, $batchNum, $orgCache,
+        $anabix, $ecomail, $transformer, $listMemberMap,
+        $fetchOrgs, $fetchDetail, $orgConcurrency, $batchSize
+    );
 
-        // Optionally fetch full detail
-        if ($fetchDetail && $contactId !== null) {
-            $detail = $anabix->getContact((int) $contactId);
-            if ($detail !== null) {
-                $contact = array_merge($contact, $detail);
-            }
-            usleep(200000);
-        }
+    // Fallback: delta returned 0 → try full export
+    if (!$hasContacts && $changedSince !== null) {
+        output("Delta returned 0 contacts, falling back to full export...");
+        $logger->info("Delta empty, falling back to full export");
+        $report['sync_mode'] = 'full_fallback';
 
-        // Inject list memberships if not already present
-        if ($contactId !== null && empty($contact['lists']) && isset($listMemberMap[(int) $contactId])) {
-            $contact['lists'] = array_map(
-                fn($title) => ['title' => $title],
-                $listMemberMap[(int) $contactId]
-            );
-        }
-
-        // Get organization from cache
-        $orgId = $contact['idOrganization'] ?? $contact['organizationId'] ?? null;
-        $org = ($orgId !== null && isset($orgCache[(int) $orgId])) ? $orgCache[(int) $orgId] : null;
-
-        // Transform
-        $subscriber = $transformer->transform($contact, $org);
-
-        if ($subscriber === null) {
-            $report['skipped']++;
-            continue;
-        }
-
-        $subscribers[] = $subscriber;
+        $hasContacts = processContactPages(
+            $anabix->getContactsPaginated(null),
+            $report, $subscribers, $batchNum, $orgCache,
+            $anabix, $ecomail, $transformer, $listMemberMap,
+            $fetchOrgs, $fetchDetail, $orgConcurrency, $batchSize
+        );
     }
 
-    $report['transformed'] = count($subscribers);
-    output("Transformed: {$report['transformed']} subscribers (skipped: {$report['skipped']})");
+    // Send remaining subscribers
+    if (!empty($subscribers)) {
+        $batchNum++;
+        $report['transformed'] += count($subscribers);
+        output("  Batch {$batchNum} (" . count($subscribers) . " subscribers)");
 
-    if (empty($subscribers)) {
-        output("No valid subscribers to send.");
-        goto finish;
-    }
-
-    // ── Step 6: Send to Ecomail in batches ────────────────────────────
-
-    $batches = array_chunk($subscribers, $batchSize);
-    output("Sending " . count($subscribers) . " subscribers in " . count($batches) . " batch(es)...");
-
-    foreach ($batches as $i => $batch) {
-        $batchNum = $i + 1;
-        output("  Batch {$batchNum}/" . count($batches) . " (" . count($batch) . " subscribers)");
-
-        $result = $ecomail->bulkUpsertContacts($batch);
-
+        $result = $ecomail->bulkUpsertContacts($subscribers);
         $report['imported'] += $result['imported'];
         $report['updated'] += $result['updated'];
         $report['failed'] += $result['failed'];
-
         foreach ($result['errors'] as $err) {
             $report['errors'][] = "Batch {$batchNum}: {$err}";
         }
 
-        // Rate limiting between batches
-        if ($batchNum < count($batches)) {
-            sleep(2);
+        $subscribers = [];
+    }
+
+    output("Fetched: {$report['contacts_fetched']} contacts total");
+    output("Transformed: {$report['transformed']} subscribers (skipped: {$report['skipped']})");
+    output("Sent in {$batchNum} batch(es)");
+
+    // Save updated org cache
+    if ($fetchOrgs && !empty($orgCache)) {
+        $cacheDir = dirname($orgCacheFile);
+        if (!is_dir($cacheDir)) {
+            mkdir($cacheDir, 0755, true);
         }
+        file_put_contents(
+            $orgCacheFile,
+            json_encode($orgCache, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE),
+            LOCK_EX
+        );
+        output("Org cache saved: " . count($orgCache) . " total");
+    }
+
+    if (!$hasContacts) {
+        output("No contacts to sync.");
+        $report['status'] = 'ok';
+        goto finish;
     }
 
     output("Import done: imported={$report['imported']} updated={$report['updated']} failed={$report['failed']}");
