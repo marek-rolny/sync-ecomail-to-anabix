@@ -50,7 +50,7 @@ class AnabixClient
      * @param string|null $changedSince  ISO 8601 or Y-m-d H:i:s
      * @return \Generator<int, array[], void, void>  Yields [contact, contact, ...] per page
      */
-    public function getContactsPaginated(?string $changedSince = null): \Generator
+    public function getContactsPaginated(?string $changedSince = null, bool $fullInfo = false): \Generator
     {
         $page = 1;
         $totalFetched = 0;
@@ -59,6 +59,9 @@ class AnabixClient
             $data = ['page' => $page];
             if ($changedSince !== null) {
                 $data['changedSince'] = $changedSince;
+            }
+            if ($fullInfo) {
+                $data['fullInfo'] = 1;
             }
 
             $response = $this->request('contacts', 'getAll', $data);
