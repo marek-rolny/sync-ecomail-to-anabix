@@ -32,10 +32,12 @@
 // ── Web compatibility: prevent proxy timeout ─────────────────────────
 set_time_limit(0);
 ini_set('max_execution_time', '0');
+ini_set('memory_limit', '512M');
 
 if (php_sapi_name() !== 'cli') {
     header('Content-Type: text/plain; charset=utf-8');
     header('X-Accel-Buffering: no');
+    header('Cache-Control: no-cache');
     ini_set('output_buffering', '0');
     ini_set('zlib.output_compression', '0');
     if (function_exists('apache_setenv')) {
@@ -45,6 +47,9 @@ if (php_sapi_name() !== 'cli') {
         ob_end_flush();
     }
     ob_implicit_flush(true);
+
+    echo str_repeat(' ', 8192) . "\n";
+    flush();
 }
 
 require_once __DIR__ . '/src/env.php';
