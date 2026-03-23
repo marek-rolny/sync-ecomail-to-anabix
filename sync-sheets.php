@@ -1,14 +1,10 @@
 <?php
 
-ini_set('display_errors', '1');
-ini_set('display_startup_errors', '1');
-error_reporting(E_ALL);
-
 /**
  * Sync script: Reads rows from a public Google Sheet and creates
  * activities (events) on matching contacts in Anabix CRM.
  *
- * Google Sheet columns:
+ * Google Sheet columns (configurable via .env):
  *   A: EmailAddress - used to find the contact in Anabix
  *   B: Date         - date for the activity (YYYY-MM-DD)
  *   C: Reason       - content/body of the activity
@@ -18,7 +14,6 @@ error_reporting(E_ALL);
 
 require_once __DIR__ . '/src/env.php';
 require_once __DIR__ . '/src/Logger.php';
-require_once __DIR__ . '/src/SyncState.php';
 require_once __DIR__ . '/src/AnabixClient.php';
 require_once __DIR__ . '/src/GoogleSheetsClient.php';
 
@@ -32,33 +27,22 @@ if (!file_exists($envFile)) {
 loadEnv($envFile);
 
 // ── Validate required config ─────────────────────────────────────────
+// Support both old (ANABIX_API_USER/TOKEN) and new (ANABIX_USERNAME/TOKEN) env var names
 
-$requiredVars = ['ANABIX_API_USER', 'ANABIX_API_TOKEN', 'ANABIX_API_URL', 'GOOGLE_SHEET_ID'];
-foreach ($requiredVars as $var) {
-    if (env($var) === '') {
-        echo "Error: Required config variable {$var} is not set in .env\n";
-        exit(1);
-    }
+$anabixUser = env('ANABIX_USERNAME', '') ?: env('ANABIX_API_USER', '');
+$anabixToken = env('ANABIX_TOKEN', '') ?: env('ANABIX_API_TOKEN', '');
+$anabixUrl = env('ANABIX_API_URL', '');
+
+if ($anabixUser === '' || $anabixToken === '' || $anabixUrl === '' || env('GOOGLE_SHEET_ID') === '') {
+    echo "Error: Required config not set. Need ANABIX_USERNAME, ANABIX_TOKEN, ANABIX_API_URL, GOOGLE_SHEET_ID\n";
+    exit(1);
 }
-
-// Debug: show loaded credential lengths and detect invisible chars
-$debugUser = env('ANABIX_API_USER');
-$debugToken = env('ANABIX_API_TOKEN');
-echo "[DEBUG] ANABIX_API_USER  length=" . strlen($debugUser) . " hex_first4=" . bin2hex(substr($debugUser, 0, 4)) . PHP_EOL;
-echo "[DEBUG] ANABIX_API_TOKEN length=" . strlen($debugToken) . " hex_first4=" . bin2hex(substr($debugToken, 0, 4)) . PHP_EOL;
-unset($debugUser, $debugToken);
 
 // ── Initialize components ────────────────────────────────────────────
 
 $logger = new Logger(__DIR__ . '/storage/logs');
-$syncState = new SyncState(__DIR__ . '/storage/state');
 
-$anabix = new AnabixClient(
-    env('ANABIX_API_USER'),
-    env('ANABIX_API_TOKEN'),
-    env('ANABIX_API_URL'),
-    $logger
-);
+$anabix = new AnabixClient($anabixUser, $anabixToken, $anabixUrl, $logger);
 
 $sheets = new GoogleSheetsClient(
     env('GOOGLE_SHEET_ID'),
@@ -66,7 +50,7 @@ $sheets = new GoogleSheetsClient(
     $logger
 );
 
-$activityIdUser = (int) env('ANABIX_ACTIVITY_ID_USER', '5');
+$activityIdUser = (int) env('ANABIX_ACTIVITY_ID_USER', '6');
 $activityType = env('ANABIX_ACTIVITY_TYPE', 'note');
 $activityTitle = env('ANABIX_ACTIVITY_TITLE', 'Odhlášení z newsletteru');
 
@@ -74,6 +58,14 @@ $activityTitle = env('ANABIX_ACTIVITY_TITLE', 'Odhlášení z newsletteru');
 $colEmail = env('SHEET_COL_EMAIL', 'EmailAddress');
 $colDate = env('SHEET_COL_DATE', 'Date');
 $colReason = env('SHEET_COL_REASON', 'Reason');
+
+// ── Row deduplication state (own state file, not shared with contacts sync) ──
+
+$stateFile = __DIR__ . '/storage/state/sheets-sync-state.json';
+$processedKeys = [];
+if (file_exists($stateFile)) {
+    $processedKeys = json_decode(file_get_contents($stateFile), true) ?: [];
+}
 
 // ── Console output helper ────────────────────────────────────────────
 
@@ -106,7 +98,6 @@ $report = [
 ];
 
 try {
-    // Fetch rows from Google Sheet
     output("Stahuji data z Google Sheets...");
     $rows = $sheets->fetchRows();
     $report['total_rows'] = count($rows);
@@ -115,68 +106,56 @@ try {
 
     if (empty($rows)) {
         output("Zadne radky ke zpracovani.");
-        $report['status'] = 'ok';
     }
 
     foreach ($rows as $index => $row) {
-        $rowNum = $index + 2; // +2 because row 1 is header, index is 0-based
+        $rowNum = $index + 2; // +2: row 1 = header, index 0-based
         $email = strtolower(trim($row[$colEmail] ?? ''));
         $date = trim($row[$colDate] ?? '');
         $reason = trim($row[$colReason] ?? '');
 
-        // Skip empty rows
         if ($email === '') {
-            output("  Radek {$rowNum}: PRESKOCEN (prazdny email)");
             $report['skipped_not_found']++;
             continue;
         }
 
-        // Validate email format
         if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
             output("  Radek {$rowNum}: PRESKOCEN (neplatny email: {$email})");
-            $logger->warning("Skipping invalid email from sheet", ['row' => $rowNum, 'email' => $email]);
             $report['skipped_not_found']++;
             continue;
         }
 
-        // Check if this row was already synced (use email+date as key)
-        $syncKey = "sheet:{$email}:{$date}";
-        if ($syncState->isSynced($syncKey)) {
-            output("  Radek {$rowNum}: PRESKOCEN (uz synchronizovano) - {$email}");
+        // Dedup: email+date+reason
+        $stateKey = md5("sheet:{$email}:{$date}:{$reason}");
+        if (isset($processedKeys[$stateKey])) {
             $report['skipped_synced']++;
             continue;
         }
 
-        // Find contact in Anabix by email
-        output("  Radek {$rowNum}: Hledam kontakt {$email} v Anabixu...");
+        // Find contact in Anabix
+        output("  Radek {$rowNum}: Hledam kontakt {$email}...");
         $contact = $anabix->findContactByEmail($email);
 
         if ($contact === null) {
-            output("  Radek {$rowNum}: PRESKOCEN (kontakt nenalezen v Anabixu) - {$email}");
-            $logger->warning("Contact not found in Anabix", ['email' => $email, 'row' => $rowNum]);
+            output("  Radek {$rowNum}: PRESKOCEN (nenalezeno) - {$email}");
             $report['skipped_not_found']++;
-            usleep(200000); // 200ms - rate limiting
+            usleep(200000);
             continue;
         }
 
         $contactId = $contact['idContact'] ?? $contact['id'] ?? null;
         if ($contactId === null) {
-            output("  Radek {$rowNum}: CHYBA (nelze zjistit ID kontaktu) - {$email}");
             $report['failed']++;
-            $report['errors'][] = "Row {$rowNum}: Cannot extract contact ID for {$email}";
+            $report['errors'][] = "Row {$rowNum}: No contact ID for {$email}";
             continue;
         }
 
-        // Build activity body with details from sheet
+        // Build activity
         $reasonText = $reason !== '' ? $reason : '(bez udani duvodu)';
         $body = "Datum: {$date}\nDůvod: {$reasonText}";
-
-        // Use the date from the sheet, default to now
         $timestamp = $date !== '' ? $date . ' 00:00:00' : date('Y-m-d H:i:s');
 
-        // Create activity in Anabix
-        output("  Radek {$rowNum}: Vytvarim udalost pro kontakt #{$contactId} ({$email})");
-        output("    -> data: idContact={$contactId}, title=\"{$activityTitle}\", body=\"{$body}\", type={$activityType}, timestamp={$timestamp} (" . strtotime($timestamp) . "), idUser={$activityIdUser}");
+        output("  Radek {$rowNum}: Vytvarim udalost pro #{$contactId} ({$email})");
 
         $result = $anabix->createActivity(
             (int) $contactId,
@@ -188,22 +167,24 @@ try {
         );
 
         if ($result !== null) {
-            output("  Radek {$rowNum}: VYTVORENO - {$email} (datum: {$date}, idUser: {$activityIdUser})");
+            output("  Radek {$rowNum}: VYTVORENO - {$email}");
             $report['created']++;
-            $syncState->markSynced($syncKey);
+            $processedKeys[$stateKey] = true;
         } else {
-            output("  Radek {$rowNum}: CHYBA pri vytvareni udalosti - {$email}");
-            output("    -> Zkontrolujte logy pro detail chyby");
+            output("  Radek {$rowNum}: CHYBA - {$email}");
             $report['failed']++;
-            $report['errors'][] = "Row {$rowNum}: Failed to create activity for {$email}";
+            $report['errors'][] = "Row {$rowNum}: Failed for {$email}";
         }
 
-        // Delay to avoid Anabix API rate limiting
-        usleep(200000); // 200ms
+        usleep(200000); // rate limiting
     }
 
-    $syncState->updateLastSync();
-    $syncState->save();
+    // Save dedup state
+    $stateDir = dirname($stateFile);
+    if (!is_dir($stateDir)) {
+        mkdir($stateDir, 0755, true);
+    }
+    file_put_contents($stateFile, json_encode($processedKeys, JSON_PRETTY_PRINT), LOCK_EX);
 
 } catch (Throwable $e) {
     $report['status'] = 'error';
@@ -239,5 +220,4 @@ output("");
 
 $logger->info("Google Sheets sync completed", $report);
 
-// Output JSON report (useful for automated processing)
 echo json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . PHP_EOL;
