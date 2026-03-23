@@ -42,10 +42,18 @@ class AnabixClient
      * @param string|null $changedSince  ISO 8601 or Y-m-d H:i:s — only contacts changed after this time
      * @return array  Flat list of contact arrays
      */
-    public function getContacts(?string $changedSince = null): array
+    /**
+     * Fetch contacts page by page as a Generator to avoid loading all into memory.
+     *
+     * Yields arrays of contacts (one array per page).
+     *
+     * @param string|null $changedSince  ISO 8601 or Y-m-d H:i:s
+     * @return \Generator<int, array[], void, void>  Yields [contact, contact, ...] per page
+     */
+    public function getContactsPaginated(?string $changedSince = null): \Generator
     {
-        $all = [];
         $page = 1;
+        $totalFetched = 0;
 
         while (true) {
             $data = ['page' => $page];
@@ -66,22 +74,36 @@ class AnabixClient
                 break;
             }
 
-            foreach ($contacts as $contact) {
-                $all[] = $contact;
-            }
+            $totalFetched += count($contacts);
 
             $this->logger->info("Fetched contacts page", [
                 'page' => $page,
                 'count' => count($contacts),
-                'total' => count($all),
+                'total' => $totalFetched,
             ]);
+
+            yield $contacts;
 
             $page++;
 
             // Rate limiting
             usleep(200000);
         }
+    }
 
+    /**
+     * Fetch all contacts into memory (legacy convenience wrapper).
+     *
+     * WARNING: For large datasets, use getContactsPaginated() instead.
+     */
+    public function getContacts(?string $changedSince = null): array
+    {
+        $all = [];
+        foreach ($this->getContactsPaginated($changedSince) as $page) {
+            foreach ($page as $contact) {
+                $all[] = $contact;
+            }
+        }
         return $all;
     }
 
