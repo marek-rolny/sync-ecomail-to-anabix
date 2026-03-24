@@ -71,6 +71,7 @@ class AnabixClient
             // After first successful page, use only 1 retry — Anabix returns
             // HTTP 500 when offset exceeds total contacts, so retrying wastes time.
             $retries = $totalFetched > 0 ? 1 : self::MAX_RETRIES;
+            $this->logger->info("Requesting contacts page {$page}", ['offset' => $offset, 'limit' => $limit]);
             $response = $this->request('contacts', 'getAll', $data, $retries);
 
             if ($response === null) {
@@ -310,6 +311,7 @@ class AnabixClient
                     CURLOPT_RETURNTRANSFER => true,
                     CURLOPT_TIMEOUT => 30,
                     CURLOPT_CONNECTTIMEOUT => 10,
+                    CURLOPT_NOSIGNAL => 1,
                 ]);
 
                 curl_multi_add_handle($multiHandle, $ch);
@@ -453,6 +455,13 @@ class AnabixClient
         ], JSON_UNESCAPED_UNICODE);
 
         for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
+            $this->logger->debug("API request start", [
+                'type' => $requestType,
+                'method' => $requestMethod,
+                'attempt' => "{$attempt}/{$maxRetries}",
+                'data_keys' => array_keys($data),
+            ]);
+
             $ch = curl_init();
             curl_setopt_array($ch, [
                 CURLOPT_URL => $this->apiUrl,
@@ -461,12 +470,24 @@ class AnabixClient
                 CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_TIMEOUT => 30,
                 CURLOPT_CONNECTTIMEOUT => 10,
+                CURLOPT_NOSIGNAL => 1, // Required for CURLOPT_TIMEOUT to work reliably
             ]);
 
+            $startTime = microtime(true);
             $responseBody = curl_exec($ch);
+            $elapsed = round(microtime(true) - $startTime, 2);
             $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
             $error = curl_error($ch);
             curl_close($ch);
+
+            $this->logger->debug("API request done", [
+                'type' => $requestType,
+                'method' => $requestMethod,
+                'http_code' => $httpCode,
+                'elapsed' => "{$elapsed}s",
+                'response_size' => strlen($responseBody ?: ''),
+                'error' => $error ?: null,
+            ]);
 
             // cURL transport error
             if ($error) {
