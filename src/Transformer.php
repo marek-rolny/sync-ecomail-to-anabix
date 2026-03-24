@@ -46,13 +46,29 @@ class Transformer
      * @param array|null $organization  Organization data (if fetched separately)
      * @return array|null  Ecomail subscriber payload, or null if no valid email
      */
+    /**
+     * Resolve the best email from contact fields: email → email2 → email3.
+     *
+     * @return array{email: string, field: string}|null  Email and which field it came from, or null
+     */
+    public function resolveEmail(array $contact): ?array
+    {
+        foreach (['email', 'email2', 'email3'] as $field) {
+            $value = strtolower(trim($contact[$field] ?? ''));
+            if ($value !== '' && filter_var($value, FILTER_VALIDATE_EMAIL)) {
+                return ['email' => $value, 'field' => $field];
+            }
+        }
+        return null;
+    }
+
     public function transform(array $contact, ?array $organization = null): ?array
     {
-        $email = strtolower(trim($contact['email'] ?? ''));
-
-        if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        $resolved = $this->resolveEmail($contact);
+        if ($resolved === null) {
             return null;
         }
+        $email = $resolved['email'];
 
         $firstName = trim($contact['firstName'] ?? $contact['name'] ?? '');
         $lastName = trim($contact['lastName'] ?? $contact['surname'] ?? '');
