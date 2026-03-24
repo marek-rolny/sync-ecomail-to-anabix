@@ -89,17 +89,31 @@ class AnabixClient
                     $pageIds[] = (int) $id;
                 }
             }
+
+            $firstIds = array_slice($pageIds, 0, 5);
+            $this->logger->info("Page IDs debug", [
+                'page' => $page,
+                'total_on_page' => count($pageIds),
+                'first_5_ids' => $firstIds,
+                'total_pages_meta' => $totalPages,
+                'response_keys' => array_keys($response),
+            ]);
+
             if (!empty($pageIds)) {
                 $newIds = array_diff($pageIds, array_keys($seenIds));
+                foreach ($pageIds as $id) {
+                    $seenIds[$id] = true;
+                }
                 if (empty($newIds)) {
-                    $this->logger->info("Pagination loop detected, stopping", [
+                    $this->logger->warning("Pagination loop detected on page {$page}, but continuing (debug mode)", [
                         'page' => $page,
                         'total_unique' => count($seenIds),
                     ]);
-                    break;
-                }
-                foreach ($pageIds as $id) {
-                    $seenIds[$id] = true;
+                    // In debug mode: stop after 15 pages max to prevent infinite loop
+                    if ($page >= 15) {
+                        $this->logger->info("Hard stop at page 15 (debug limit)");
+                        break;
+                    }
                 }
             }
 
@@ -116,8 +130,13 @@ class AnabixClient
             yield $contacts;
 
             // Stop if we've reached the last page (from API metadata)
-            if ($totalPages !== null && $page >= (int) $totalPages) {
-                $this->logger->info("Reached last page", ['page' => $page, 'totalPages' => $totalPages]);
+            // DEBUG: temporarily disabled — Anabix may report wrong totalPages
+            // if ($totalPages !== null && $page >= (int) $totalPages) {
+            //     $this->logger->info("Reached last page", ['page' => $page, 'totalPages' => $totalPages]);
+            //     break;
+            // }
+            // Hard limit: 15 pages (debug)
+            if ($page >= 15) {
                 break;
             }
 
