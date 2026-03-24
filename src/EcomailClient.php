@@ -90,6 +90,8 @@ class EcomailClient
         // Parse response — Ecomail returns 'inserted' and 'updated' counts
         $result['imported'] = (int) ($response['inserted'] ?? $response['imported'] ?? 0);
         $result['updated'] = (int) ($response['updated'] ?? 0);
+        // Store raw response keys and values for debugging
+        $result['ecomail_response'] = $response;
 
         // Do NOT fake counts — if Ecomail says 0, it means 0
         $skippedByEcomail = count($subscribers) - $result['imported'] - $result['updated'];
