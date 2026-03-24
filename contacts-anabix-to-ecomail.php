@@ -124,12 +124,15 @@ $birthdayFieldId = env('ANABIX_BIRTHDAY_FIELD_ID', '') !== ''
     ? (int) env('ANABIX_BIRTHDAY_FIELD_ID')
     : null;
 
-$transformer = new Transformer($ownerMap, $customFieldMap, $birthdayFieldId);
+// Default owner: ANABIX_OWNER_6 ("Robot Karel") — used when contact's idOwner is not in the map
+$defaultOwner = $ownerMap[6] ?? 'Robot Karel';
+
+$transformer = new Transformer($ownerMap, $customFieldMap, $birthdayFieldId, $defaultOwner);
 
 // ── Runtime options ───────────────────────────────────────────────────
 
 $fetchDetail = env('ANABIX_FETCH_DETAIL', 'false') === 'true';
-$fetchLists = env('ANABIX_FETCH_LISTS', 'true') === 'true';
+$fetchLists = env('ANABIX_FETCH_LISTS', 'false') === 'true';
 $fetchOrgs = env('ANABIX_FETCH_ORGS', 'true') === 'true';
 $orgConcurrency = (int) env('ANABIX_ORG_CONCURRENCY', '20');
 $orgCacheFile = env('ANABIX_ORG_CACHE_FILE', __DIR__ . '/storage/state/org_cache.json');
