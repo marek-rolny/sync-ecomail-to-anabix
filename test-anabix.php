@@ -158,4 +158,95 @@ if (is_array($data) && !empty($data)) {
     }
 }
 
-echo "=== All checks passed ===\n";
+echo "=== All checks passed ===\n\n";
+
+// ── Step 5: Pagination test — fetch pages 1-3 ──────────────────────────
+echo "5. Pagination test (pages 1-3, with changedSince=2000-01-01)\n\n";
+
+$allSeenIds = [];
+for ($testPage = 1; $testPage <= 3; $testPage++) {
+    $testData = [
+        'page' => $testPage,
+        'changedSince' => '2000-01-01T00:00:00+00:00',
+    ];
+    $testPayload = json_encode([
+        'username' => $username,
+        'token' => $token,
+        'requestType' => 'contacts',
+        'requestMethod' => 'getAll',
+        'data' => $testData,
+    ], JSON_UNESCAPED_UNICODE);
+
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL => $apiUrl,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => ['json' => $testPayload],
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => 30,
+        CURLOPT_CONNECTTIMEOUT => 10,
+    ]);
+
+    $start = microtime(true);
+    $pageBody = curl_exec($ch);
+    $pageElapsed = round(microtime(true) - $start, 2);
+    $pageHttpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    $pageResponse = json_decode($pageBody, true);
+
+    echo "   Page {$testPage}: HTTP {$pageHttpCode}, {$pageElapsed}s, " . strlen($pageBody) . " bytes\n";
+
+    if (!is_array($pageResponse)) {
+        echo "   => Invalid JSON, skipping\n\n";
+        continue;
+    }
+
+    // Show response top-level keys
+    $topKeys = array_keys($pageResponse);
+    echo "   Response keys: " . implode(', ', $topKeys) . "\n";
+
+    // Show pagination metadata
+    $pagesVal = $pageResponse['pages'] ?? $pageResponse['totalPages'] ?? 'N/A';
+    $pageVal = $pageResponse['page'] ?? 'N/A';
+    echo "   pages={$pagesVal}, page={$pageVal}\n";
+
+    // Extract contacts
+    $pageData = $pageResponse['data'] ?? [];
+    if (is_array($pageData) && !empty($pageData)) {
+        $firstItem = reset($pageData);
+        if (is_array($firstItem)) {
+            $contacts = array_values($pageData);
+        } elseif (isset($pageData['idContact'])) {
+            $contacts = [$pageData];
+        } else {
+            $contacts = [];
+        }
+    } else {
+        $contacts = [];
+    }
+
+    echo "   Contacts: " . count($contacts) . "\n";
+
+    // Show first 5 IDs
+    $ids = [];
+    foreach (array_slice($contacts, 0, 5) as $c) {
+        $ids[] = $c['idContact'] ?? $c['id'] ?? '?';
+    }
+    echo "   First 5 IDs: " . implode(', ', $ids) . "\n";
+
+    // Check for duplicates with previous pages
+    $pageIds = [];
+    foreach ($contacts as $c) {
+        $id = $c['idContact'] ?? $c['id'] ?? null;
+        if ($id !== null) $pageIds[] = (int) $id;
+    }
+    $dupes = array_intersect($pageIds, $allSeenIds);
+    echo "   Duplicates with prev pages: " . count($dupes) . "/" . count($pageIds) . "\n";
+    $allSeenIds = array_merge($allSeenIds, $pageIds);
+    echo "   Total unique IDs so far: " . count(array_unique($allSeenIds)) . "\n\n";
+
+    usleep(300000); // rate limit
+}
+
+echo "=== Pagination test done ===\n";
