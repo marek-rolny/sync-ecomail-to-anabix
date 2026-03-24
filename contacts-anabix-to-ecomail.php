@@ -425,6 +425,27 @@ if (!empty($report['errors'])) {
     }
 }
 
+// ── Save status for web display ──────────────────────────────────
+
+$statusFile = __DIR__ . '/storage/logs/last_run_status.json';
+$statusDir = dirname($statusFile);
+if (!is_dir($statusDir)) {
+    mkdir($statusDir, 0755, true);
+}
+
+$statusData = [
+    'timestamp' => date('Y-m-d H:i:s'),
+    'mode' => $report['sync_mode'],
+    'fetched' => $report['contacts_fetched'],
+    'transformed' => $report['transformed'],
+    'imported' => $report['imported'],
+    'updated' => $report['updated'],
+    'failed' => $report['failed'],
+    'status' => $report['status'],
+];
+
+file_put_contents($statusFile, json_encode($statusData, JSON_PRETTY_PRINT) . PHP_EOL, LOCK_EX);
+
 $logger->info("Sync completed", $report);
 
 // JSON output (for automated processing / HTTP)

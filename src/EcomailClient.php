@@ -81,6 +81,9 @@ class EcomailClient
             return $result;
         }
 
+        // Log full response for debugging
+        $this->logger->debug("Ecomail subscribe-bulk response", ['response' => $response]);
+
         // Parse response — Ecomail may return counts or just status
         $result['imported'] = $response['inserted'] ?? $response['imported'] ?? 0;
         $result['updated'] = $response['updated'] ?? 0;
@@ -94,6 +97,7 @@ class EcomailClient
             'sent' => count($subscribers),
             'imported' => $result['imported'],
             'updated' => $result['updated'],
+            'response_keys' => array_keys($response),
         ]);
 
         return $result;
