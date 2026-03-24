@@ -23,6 +23,7 @@
 set_time_limit(0);
 ini_set('max_execution_time', '0');
 ini_set('memory_limit', '512M');
+ignore_user_abort(true); // Continue running even if browser/proxy disconnects
 
 if (php_sapi_name() !== 'cli') {
     // Disable all buffering so output reaches the proxy immediately

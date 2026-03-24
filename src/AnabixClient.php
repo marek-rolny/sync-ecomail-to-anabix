@@ -23,8 +23,8 @@ class AnabixClient
     private string $apiUrl;
     private Logger $logger;
 
-    private const MAX_RETRIES = 5;
-    private const RETRY_BASE_DELAY = 3; // seconds
+    private const MAX_RETRIES = 3;
+    private const RETRY_BASE_DELAY = 3; // seconds — linear: 3s, 6s, 9s
 
     public function __construct(string $user, string $token, string $apiUrl, Logger $logger)
     {
@@ -71,7 +71,17 @@ class AnabixClient
             $response = $this->request('contacts', 'getAll', $data);
 
             if ($response === null) {
-                $this->logger->error("Failed to fetch contacts", ['offset' => $offset, 'limit' => $limit]);
+                if ($totalFetched > 0) {
+                    // We already have data — treat this as probable end of data.
+                    // Anabix API is known to return HTTP 500 when offset exceeds total contacts.
+                    $this->logger->warning("Failed to fetch contacts at offset {$offset}, but already have {$totalFetched} contacts — treating as end of data", [
+                        'offset' => $offset,
+                        'limit' => $limit,
+                        'total_fetched' => $totalFetched,
+                    ]);
+                } else {
+                    $this->logger->error("Failed to fetch contacts on first page", ['offset' => $offset, 'limit' => $limit]);
+                }
                 break;
             }
 
@@ -444,8 +454,8 @@ class AnabixClient
                 CURLOPT_POST => true,
                 CURLOPT_POSTFIELDS => ['json' => $payload],
                 CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_TIMEOUT => 60,
-                CURLOPT_CONNECTTIMEOUT => 15,
+                CURLOPT_TIMEOUT => 30,
+                CURLOPT_CONNECTTIMEOUT => 10,
             ]);
 
             $responseBody = curl_exec($ch);
