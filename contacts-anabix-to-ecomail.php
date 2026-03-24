@@ -266,17 +266,41 @@ function processContactPages(
         // Transform contacts from this page
         foreach ($pageContacts as $contact) {
             $contactId = $contact['idContact'] ?? $contact['id'] ?? null;
-            $rawEmail = $contact['email'] ?? '';
-
-            // Count contacts without email
             $contactName = trim(($contact['firstName'] ?? '') . ' ' . ($contact['lastName'] ?? ''));
-            if (trim($rawEmail) === '') {
-                $report['skipped_no_email'] = ($report['skipped_no_email'] ?? 0) + 1;
-                $report['skipped']++;
-                $report['skipped_contacts'][] = [
-                    'id' => $contactId, 'name' => $contactName, 'reason' => 'no_email',
-                ];
+
+            // Resolve best email (email → email2 → email3)
+            $resolved = $transformer->resolveEmail($contact);
+
+            if ($resolved === null) {
+                // No valid email in any field
+                $hasAnyEmail = trim($contact['email'] ?? '') !== ''
+                    || trim($contact['email2'] ?? '') !== ''
+                    || trim($contact['email3'] ?? '') !== '';
+                if ($hasAnyEmail) {
+                    $report['skipped_invalid_email'] = ($report['skipped_invalid_email'] ?? 0) + 1;
+                    $report['skipped']++;
+                    $report['skipped_contacts'][] = [
+                        'id' => $contactId, 'name' => $contactName,
+                        'email' => $contact['email'] ?? '', 'email2' => $contact['email2'] ?? '',
+                        'email3' => $contact['email3'] ?? '', 'reason' => 'invalid_email',
+                    ];
+                } else {
+                    $report['skipped_no_email'] = ($report['skipped_no_email'] ?? 0) + 1;
+                    $report['skipped']++;
+                    $report['skipped_contacts'][] = [
+                        'id' => $contactId, 'name' => $contactName, 'reason' => 'no_email',
+                    ];
+                }
                 continue;
+            }
+
+            // Track how many contacts used email2/email3 fallback
+            if ($resolved['field'] !== 'email') {
+                $report['email_fallback'] = ($report['email_fallback'] ?? 0) + 1;
+                $logger->debug("Using fallback email field", [
+                    'contact_id' => $contactId, 'name' => $contactName,
+                    'field' => $resolved['field'], 'email' => $resolved['email'],
+                ]);
             }
 
             $orgId = $contact['idOrganization'] ?? $contact['organizationId'] ?? null;
@@ -285,11 +309,12 @@ function processContactPages(
             $subscriber = $transformer->transform($contact, $org);
 
             if ($subscriber === null) {
+                // Should not happen since resolveEmail already validated, but safety check
                 $report['skipped_invalid_email'] = ($report['skipped_invalid_email'] ?? 0) + 1;
                 $report['skipped']++;
                 $report['skipped_contacts'][] = [
                     'id' => $contactId, 'name' => $contactName,
-                    'email' => $rawEmail, 'reason' => 'invalid_email',
+                    'email' => $contact['email'] ?? '', 'reason' => 'invalid_email',
                 ];
                 continue;
             }
@@ -550,7 +575,9 @@ try {
 
     output("Fetched: {$report['contacts_fetched']} contacts total from Anabix");
     output("Unique valid emails: {$uniqueEmails}");
+    $emailFallback = $report['email_fallback'] ?? 0;
     output("Skipped: {$report['skipped']} (no email: {$noEmail}, invalid email: {$invalidEmail}, duplicate: {$duplicates})");
+    output("Email fallback (email2/email3): {$emailFallback}");
     output("Transformed: {$report['transformed']} subscribers");
     output("Sent in {$batchNum} batch(es)");
 
@@ -622,6 +649,7 @@ output("Skipped total:  {$report['skipped']}");
 output("  No email:     " . ($report['skipped_no_email'] ?? 0));
 output("  Invalid email:" . ($report['skipped_invalid_email'] ?? 0));
 output("  Duplicate:    " . ($report['skipped_duplicate'] ?? 0));
+output("Email fallback: " . ($report['email_fallback'] ?? 0));
 output("Imported:       {$report['imported']}");
 output("Updated:        {$report['updated']}");
 output("Failed:         {$report['failed']}");
@@ -653,6 +681,7 @@ $statusData = [
     'skipped_no_email' => $report['skipped_no_email'] ?? 0,
     'skipped_invalid_email' => $report['skipped_invalid_email'] ?? 0,
     'skipped_duplicate' => $report['skipped_duplicate'] ?? 0,
+    'email_fallback' => $report['email_fallback'] ?? 0,
     'imported' => $report['imported'],
     'updated' => $report['updated'],
     'failed' => $report['failed'],
