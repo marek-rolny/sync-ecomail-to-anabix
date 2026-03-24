@@ -53,6 +53,27 @@ require_once __DIR__ . '/src/AnabixClient.php';
 require_once __DIR__ . '/src/EcomailClient.php';
 require_once __DIR__ . '/src/Transformer.php';
 
+// ── Prevent concurrent runs ──────────────────────────────────────────
+$lockFile = __DIR__ . '/storage/state/sync.lock';
+$lockDir = dirname($lockFile);
+if (!is_dir($lockDir)) {
+    mkdir($lockDir, 0755, true);
+}
+$lockFp = fopen($lockFile, 'w');
+if (!flock($lockFp, LOCK_EX | LOCK_NB)) {
+    $msg = 'Another sync is already running. Please wait for it to finish.';
+    if (php_sapi_name() !== 'cli') {
+        echo $msg . "\n";
+    } else {
+        fwrite(STDERR, $msg . "\n");
+    }
+    fclose($lockFp);
+    exit(0);
+}
+// Lock acquired — will be released when the script ends (or on fclose)
+fwrite($lockFp, (string) getmypid());
+fflush($lockFp);
+
 // ── Load configuration ────────────────────────────────────────────────
 
 $envFile = __DIR__ . '/.env';
