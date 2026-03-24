@@ -52,12 +52,15 @@ class AnabixClient
      */
     public function getContactsPaginated(?string $changedSince = null, bool $fullInfo = false): \Generator
     {
-        $page = 1;
+        $limit = 200;
+        $offset = 0;
+        $page = 0;
         $totalFetched = 0;
         $seenIds = [];
 
         while (true) {
-            $data = ['page' => $page];
+            $page++;
+            $data = ['limit' => $limit, 'offset' => $offset];
             if ($changedSince !== null) {
                 $data['changedSince'] = $changedSince;
             }
@@ -68,20 +71,18 @@ class AnabixClient
             $response = $this->request('contacts', 'getAll', $data);
 
             if ($response === null) {
-                $this->logger->error("Failed to fetch contacts page", ['page' => $page]);
+                $this->logger->error("Failed to fetch contacts", ['offset' => $offset, 'limit' => $limit]);
                 break;
             }
-
-            // Read pagination metadata before extracting list
-            $totalPages = $response['pages'] ?? $response['totalPages'] ?? null;
 
             $contacts = $this->extractList($response);
 
             if (empty($contacts)) {
+                $this->logger->info("No more contacts returned", ['offset' => $offset]);
                 break;
             }
 
-            // Detect loop: if we see the same contact IDs again, Anabix is cycling
+            // Detect duplicates as a safety check
             $pageIds = [];
             foreach ($contacts as $c) {
                 $id = $c['idContact'] ?? $c['id'] ?? null;
@@ -90,15 +91,6 @@ class AnabixClient
                 }
             }
 
-            $firstIds = array_slice($pageIds, 0, 5);
-            $this->logger->info("Page IDs debug", [
-                'page' => $page,
-                'total_on_page' => count($pageIds),
-                'first_5_ids' => $firstIds,
-                'total_pages_meta' => $totalPages,
-                'response_keys' => array_keys($response),
-            ]);
-
             if (!empty($pageIds)) {
                 $newIds = array_diff($pageIds, array_keys($seenIds));
                 foreach ($pageIds as $id) {
@@ -106,7 +98,7 @@ class AnabixClient
                 }
                 if (empty($newIds)) {
                     $this->logger->info("Pagination loop detected, stopping", [
-                        'page' => $page,
+                        'offset' => $offset,
                         'total_unique' => count($seenIds),
                     ]);
                     break;
@@ -115,23 +107,27 @@ class AnabixClient
 
             $totalFetched += count($contacts);
 
-            $this->logger->info("Fetched contacts page", [
+            $this->logger->info("Fetched contacts", [
                 'page' => $page,
+                'offset' => $offset,
                 'count' => count($contacts),
                 'total' => $totalFetched,
                 'unique_ids' => count($seenIds),
-                'total_pages' => $totalPages,
             ]);
 
             yield $contacts;
 
-            // Stop if we've reached the last page (from API metadata)
-            if ($totalPages !== null && $page >= (int) $totalPages) {
-                $this->logger->info("Reached last page", ['page' => $page, 'totalPages' => $totalPages]);
+            // If we got fewer than the limit, we've reached the end
+            if (count($contacts) < $limit) {
+                $this->logger->info("Last page reached (partial page)", [
+                    'offset' => $offset,
+                    'count' => count($contacts),
+                    'total' => $totalFetched,
+                ]);
                 break;
             }
 
-            $page++;
+            $offset += $limit;
 
             // Rate limiting
             usleep(200000);
