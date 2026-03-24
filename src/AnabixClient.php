@@ -212,55 +212,6 @@ class AnabixClient
         return null;
     }
 
-    // ── Lists ─────────────────────────────────────────────────────────
-
-    /**
-     * Fetch all lists (groups/categories) from Anabix.
-     *
-     * @return array  List of ['idList' => ..., 'title' => ...] arrays
-     */
-    public function getLists(): array
-    {
-        $response = $this->request('lists', 'getAll');
-
-        if ($response === null) {
-            return [];
-        }
-
-        return $this->extractList($response);
-    }
-
-    /**
-     * Fetch member contact IDs for a specific list.
-     *
-     * @return int[]  Array of contact IDs belonging to the list
-     */
-    public function getListMembers(int $listId): array
-    {
-        $response = $this->request('lists', 'getMembers', ['idList' => $listId]);
-
-        if ($response === null) {
-            return [];
-        }
-
-        // Response may be a flat list of IDs or list of objects
-        $data = $this->extractList($response);
-        $ids = [];
-
-        foreach ($data as $item) {
-            if (is_numeric($item)) {
-                $ids[] = (int) $item;
-            } elseif (is_array($item)) {
-                $id = $item['idContact'] ?? $item['id'] ?? null;
-                if ($id !== null) {
-                    $ids[] = (int) $id;
-                }
-            }
-        }
-
-        return $ids;
-    }
-
     // ── Organizations ─────────────────────────────────────────────────
 
     /**

@@ -168,8 +168,6 @@ $birthdayFieldId = env('ANABIX_BIRTHDAY_FIELD_ID', '') !== ''
 
 // ── Runtime options ───────────────────────────────────────────────────
 
-$fetchDetail = env('ANABIX_FETCH_DETAIL', 'false') === 'true';
-$fetchLists = env('ANABIX_FETCH_LISTS', 'false') === 'true';
 $fetchOrgs = env('ANABIX_FETCH_ORGS', 'true') === 'true';
 $orgConcurrency = (int) env('ANABIX_ORG_CONCURRENCY', '20');
 $orgCacheFile = env('ANABIX_ORG_CACHE_FILE', __DIR__ . '/storage/state/org_cache.json');
@@ -180,7 +178,7 @@ $forceSince = env('SYNC_FORCE_SINCE', '') ?: null;
 // Default owner: ANABIX_OWNER_6 ("Robot Karel") — used when contact's idOwner is not in the map
 $defaultOwner = $ownerMap[6] ?? 'Robot Karel';
 
-$transformer = new Transformer($ownerMap, $customFieldMap, $birthdayFieldId, $defaultOwner, $fetchLists);
+$transformer = new Transformer($ownerMap, $customFieldMap, $birthdayFieldId, $defaultOwner);
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -212,7 +210,6 @@ function processContactPages(
     Transformer $transformer,
     Logger $logger,
     bool $fetchOrgs,
-    bool $fetchDetail,
     int $orgConcurrency,
     int $batchSize,
     ?int &$maxTimestamp = null
@@ -276,14 +273,6 @@ function processContactPages(
                 $report['skipped_no_email'] = ($report['skipped_no_email'] ?? 0) + 1;
                 $report['skipped']++;
                 continue;
-            }
-
-            if ($fetchDetail && $contactId !== null) {
-                $detail = $anabix->getContact((int) $contactId);
-                if ($detail !== null) {
-                    $contact = array_merge($contact, $detail);
-                }
-                usleep(200000);
             }
 
             $orgId = $contact['idOrganization'] ?? $contact['organizationId'] ?? null;
@@ -422,11 +411,7 @@ try {
     //
     // Instead of loading all contacts into memory at once, we process
     // them in pages: fetch page → fetch missing orgs → transform → send batch.
-    // When fetchLists is enabled, we request fullInfo so contact lists
-    // (used as Ecomail tags) are included in the getAll response.
-
-    // Always use fullInfo=1 to get customFields and lists data from Anabix.
-    // $fetchLists controls only whether list names become Ecomail tags.
+    // fullInfo=1 returns customFields, lists, and revisionInfo for each contact.
     output("Fetching contacts from Anabix (fullInfo)...");
 
     $subscribers = [];
@@ -452,7 +437,7 @@ try {
             $anabix->getContactsPaginated($cursorSince, true),
             $report, $subscribers, $batchNum, $orgCache, $seenEmails,
             $anabix, $ecomail, $transformer, $logger,
-            $fetchOrgs, $fetchDetail, $orgConcurrency, $batchSize,
+            $fetchOrgs, $orgConcurrency, $batchSize,
             $maxTimestamp
         );
 
@@ -503,7 +488,7 @@ try {
                 $anabix->getContactsPaginated($cursorSince, true),
                 $report, $subscribers, $batchNum, $orgCache, $seenEmails,
                 $anabix, $ecomail, $transformer, $logger,
-                $fetchOrgs, $fetchDetail, $orgConcurrency, $batchSize,
+                $fetchOrgs, $orgConcurrency, $batchSize,
                 $maxTimestamp
             );
 
