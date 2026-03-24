@@ -18,6 +18,9 @@ class Transformer
     /** @var array<int, string>  idOwner => full name */
     private array $ownerMap;
 
+    /** @var string  Default owner name when idOwner is not in ownerMap */
+    private string $defaultOwner;
+
     /** @var array<string, int>  Ecomail merge tag => Anabix custom field ID */
     private array $customFieldMap;
 
@@ -27,9 +30,11 @@ class Transformer
     public function __construct(
         array $ownerMap = [],
         array $customFieldMap = [],
-        ?int $birthdayFieldId = null
+        ?int $birthdayFieldId = null,
+        string $defaultOwner = 'Robot Karel'
     ) {
         $this->ownerMap = $ownerMap;
+        $this->defaultOwner = $defaultOwner;
         $this->customFieldMap = $customFieldMap;
         $this->birthdayFieldId = $birthdayFieldId;
     }
@@ -279,10 +284,12 @@ class Transformer
         // Primary contact flag
         $fields['primaryContact'] = !empty($contact['primaryContact']) ? '1' : '0';
 
-        // Project manager (idOwner → name via ownerMap)
+        // Project manager (idOwner → name via ownerMap, fallback to defaultOwner)
         $idOwner = $contact['idOwner'] ?? $contact['ownerId'] ?? $contact['idUser'] ?? null;
         if ($idOwner !== null && isset($this->ownerMap[(int) $idOwner])) {
             $fields['projectManager'] = $this->ownerMap[(int) $idOwner];
+        } else {
+            $fields['projectManager'] = $this->defaultOwner;
         }
 
         // Anabix contact ID (for reverse lookup in activities sync)
@@ -297,6 +304,11 @@ class Transformer
             if ($value !== null && $value !== '') {
                 $fields[$ecomailKey] = $value;
             }
+        }
+
+        // prvniObchod must be a valid date (YYYY-MM-DD) or empty
+        if (isset($fields['prvniObchod'])) {
+            $fields['prvniObchod'] = self::normalizeDate($fields['prvniObchod']);
         }
 
         return $fields;
@@ -317,15 +329,13 @@ class Transformer
             return null;
         }
 
-        // Keyed by ID
-        if (isset($customFields[$fieldId])) {
-            return (string) $customFields[$fieldId];
-        }
-        if (isset($customFields[(string) $fieldId])) {
-            return (string) $customFields[(string) $fieldId];
+        // Keyed by ID (value may be scalar, array with 'value' key, or flat array)
+        $raw = $customFields[$fieldId] ?? $customFields[(string) $fieldId] ?? null;
+        if ($raw !== null) {
+            return self::scalarize($raw);
         }
 
-        // Array of objects
+        // Array of objects: [{idCustomField: 5, value: "..."}, ...]
         if (is_array($customFields) && isset($customFields[0])) {
             foreach ($customFields as $cf) {
                 if (!is_array($cf)) {
@@ -333,11 +343,66 @@ class Transformer
                 }
                 $cfId = $cf['idCustomField'] ?? $cf['id'] ?? null;
                 if ((int) $cfId === $fieldId) {
-                    return (string) ($cf['value'] ?? $cf['data'] ?? '');
+                    return self::scalarize($cf['value'] ?? $cf['data'] ?? '');
                 }
             }
         }
 
         return null;
+    }
+
+    /**
+     * Normalize a value to YYYY-MM-DD date string, or empty string if invalid.
+     */
+    private static function normalizeDate(string $value): string
+    {
+        $value = trim($value);
+        if ($value === '') {
+            return '';
+        }
+
+        $formats = ['Y-m-d', 'd.m.Y', 'd/m/Y', 'Y-m-d H:i:s', 'd.m.Y H:i:s'];
+        foreach ($formats as $format) {
+            $dt = \DateTimeImmutable::createFromFormat($format, $value);
+            if ($dt !== false) {
+                return $dt->format('Y-m-d');
+            }
+        }
+
+        // Try generic parsing as last resort
+        try {
+            return (new \DateTimeImmutable($value))->format('Y-m-d');
+        } catch (\Exception $e) {
+            return '';
+        }
+    }
+
+    /**
+     * Safely convert a value to string. Handles arrays/objects that Anabix
+     * sometimes wraps around scalar values.
+     */
+    private static function scalarize($value): string
+    {
+        if (is_scalar($value) || $value === null) {
+            return trim((string) $value);
+        }
+
+        if (is_array($value)) {
+            // {"value": "x"} or {"data": "x"}
+            if (isset($value['value'])) {
+                return trim((string) $value['value']);
+            }
+            if (isset($value['data'])) {
+                return trim((string) $value['data']);
+            }
+            // Flat array like ["2024-01-15"] — take first scalar element
+            foreach ($value as $item) {
+                if (is_scalar($item) && (string) $item !== '') {
+                    return trim((string) $item);
+                }
+            }
+        }
+
+        return '';
     }
 }
