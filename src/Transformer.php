@@ -27,16 +27,21 @@ class Transformer
     /** @var int|null  Anabix custom field ID for birthday */
     private ?int $birthdayFieldId;
 
+    /** @var bool  Whether to include tags in subscriber payload */
+    private bool $includeTags;
+
     public function __construct(
         array $ownerMap = [],
         array $customFieldMap = [],
         ?int $birthdayFieldId = null,
-        string $defaultOwner = 'Robot Karel'
+        string $defaultOwner = 'Robot Karel',
+        bool $includeTags = false
     ) {
         $this->ownerMap = $ownerMap;
         $this->defaultOwner = $defaultOwner;
         $this->customFieldMap = $customFieldMap;
         $this->birthdayFieldId = $birthdayFieldId;
+        $this->includeTags = $includeTags;
     }
 
     /**
@@ -78,10 +83,12 @@ class Transformer
             $subscriber['country'] = $org['billingCountry'] ?? $org['country'] ?? '';
         }
 
-        // Tags from lists
-        $tags = $this->buildTags($contact);
-        if (!empty($tags)) {
-            $subscriber['tags'] = $tags;
+        // Tags from lists (disabled by default until basic sync is stable)
+        if ($this->includeTags) {
+            $tags = $this->buildTags($contact);
+            if (!empty($tags)) {
+                $subscriber['tags'] = $tags;
+            }
         }
 
         // Birthday from custom field
@@ -256,19 +263,8 @@ class Transformer
             return null;
         }
 
-        $formats = ['Y-m-d', 'd.m.Y', 'd/m/Y', 'Y-m-d H:i:s', 'd.m.Y H:i:s'];
-        foreach ($formats as $format) {
-            $dt = \DateTimeImmutable::createFromFormat($format, $value);
-            if ($dt !== false) {
-                return $dt->format('Y-m-d');
-            }
-        }
-
-        try {
-            return (new \DateTimeImmutable($value))->format('Y-m-d');
-        } catch (\Exception $e) {
-            return null;
-        }
+        $normalized = self::normalizeDate($value);
+        return $normalized !== '' ? $normalized : null;
     }
 
     /**
@@ -353,11 +349,12 @@ class Transformer
 
     /**
      * Normalize a value to YYYY-MM-DD date string, or empty string if invalid.
+     * Rejects null-dates like 0000-00-00, dates before 1900, and garbage values.
      */
     private static function normalizeDate(string $value): string
     {
         $value = trim($value);
-        if ($value === '') {
+        if ($value === '' || $value === '0000-00-00' || $value === '0000-00-00 00:00:00') {
             return '';
         }
 
@@ -365,13 +362,22 @@ class Transformer
         foreach ($formats as $format) {
             $dt = \DateTimeImmutable::createFromFormat($format, $value);
             if ($dt !== false) {
-                return $dt->format('Y-m-d');
+                $result = $dt->format('Y-m-d');
+                // Reject dates before 1900 (Anabix null-date artifacts)
+                if ((int) $dt->format('Y') < 1900) {
+                    return '';
+                }
+                return $result;
             }
         }
 
         // Try generic parsing as last resort
         try {
-            return (new \DateTimeImmutable($value))->format('Y-m-d');
+            $dt = new \DateTimeImmutable($value);
+            if ((int) $dt->format('Y') < 1900) {
+                return '';
+            }
+            return $dt->format('Y-m-d');
         } catch (\Exception $e) {
             return '';
         }

@@ -127,7 +127,7 @@ $birthdayFieldId = env('ANABIX_BIRTHDAY_FIELD_ID', '') !== ''
 // Default owner: ANABIX_OWNER_6 ("Robot Karel") — used when contact's idOwner is not in the map
 $defaultOwner = $ownerMap[6] ?? 'Robot Karel';
 
-$transformer = new Transformer($ownerMap, $customFieldMap, $birthdayFieldId, $defaultOwner);
+$transformer = new Transformer($ownerMap, $customFieldMap, $birthdayFieldId, $defaultOwner, $fetchLists);
 
 // ── Runtime options ───────────────────────────────────────────────────
 
