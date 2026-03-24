@@ -25,25 +25,45 @@ ini_set('max_execution_time', '0');
 ini_set('memory_limit', '512M');
 ignore_user_abort(true); // Continue running even if browser/proxy disconnects
 
-if (php_sapi_name() !== 'cli') {
-    // Disable all buffering so output reaches the proxy immediately
-    header('Content-Type: text/plain; charset=utf-8');
-    header('X-Accel-Buffering: no'); // nginx
-    header('Cache-Control: no-cache');
-    ini_set('output_buffering', '0');
-    ini_set('zlib.output_compression', '0');
-    if (function_exists('apache_setenv')) {
-        apache_setenv('no-gzip', '1');
-    }
-    while (ob_get_level()) {
-        ob_end_flush();
-    }
-    ob_implicit_flush(true);
+$isWeb = php_sapi_name() !== 'cli';
 
-    // Apache mod_proxy buffers ~8KB before it starts forwarding.
-    // Send padding to fill that buffer so streaming begins immediately.
-    echo str_repeat(' ', 8192) . "\n";
-    flush();
+if ($isWeb) {
+    // Send an immediate response to the browser, then continue sync in background.
+    // This prevents proxy timeouts (sync takes ~60-70s which exceeds most proxy limits).
+
+    $webStatusFile = __DIR__ . '/storage/logs/last_run_status.json';
+    $lastStatus = file_exists($webStatusFile) ? json_decode(file_get_contents($webStatusFile), true) : null;
+
+    $mode = $_GET['mode'] ?? 'delta';
+    $body = "Sync started (mode={$mode}). The sync runs in the background (~60-70s).\n\n";
+    if ($lastStatus) {
+        $body .= "Last run: {$lastStatus['timestamp']}\n";
+        $body .= "  Mode:      {$lastStatus['mode']}\n";
+        $body .= "  Fetched:   {$lastStatus['fetched']}\n";
+        $body .= "  Emails:    {$lastStatus['unique_emails']}\n";
+        $body .= "  Status:    {$lastStatus['status']}\n";
+    } else {
+        $body .= "No previous run found.\n";
+    }
+    $body .= "\nReload this page in ~70s to see updated results.\n";
+
+    header('Content-Type: text/plain; charset=utf-8');
+    header('Cache-Control: no-cache');
+    header('Connection: close');
+    header('Content-Length: ' . strlen($body));
+    echo $body;
+
+    // Flush everything to the web server
+    if (function_exists('fastcgi_finish_request')) {
+        fastcgi_finish_request();
+    } else {
+        while (ob_get_level()) {
+            ob_end_flush();
+        }
+        flush();
+    }
+
+    // Script continues running in the background from here
 }
 
 require_once __DIR__ . '/src/env.php';
@@ -166,10 +186,10 @@ $transformer = new Transformer($ownerMap, $customFieldMap, $birthdayFieldId, $de
 
 function output(string $msg): void
 {
-    $time = date('H:i:s');
-    echo "[{$time}] {$msg}" . PHP_EOL;
-    if (php_sapi_name() !== 'cli') {
-        flush();
+    // In web mode, the connection is already closed — only log to stdout in CLI
+    if (php_sapi_name() === 'cli') {
+        $time = date('H:i:s');
+        echo "[{$time}] {$msg}" . PHP_EOL;
     }
 }
 
@@ -552,5 +572,7 @@ file_put_contents($statusFile, json_encode($statusData, JSON_PRETTY_PRINT) . PHP
 
 $logger->info("Sync completed", $report);
 
-// JSON output (for automated processing / HTTP)
-echo json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . PHP_EOL;
+// JSON output (CLI only — in web mode the connection is already closed)
+if (!$isWeb) {
+    echo json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . PHP_EOL;
+}
