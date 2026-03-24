@@ -27,21 +27,16 @@ class Transformer
     /** @var int|null  Anabix custom field ID for birthday */
     private ?int $birthdayFieldId;
 
-    /** @var bool  Whether to include tags in subscriber payload */
-    private bool $includeTags;
-
     public function __construct(
         array $ownerMap = [],
         array $customFieldMap = [],
         ?int $birthdayFieldId = null,
-        string $defaultOwner = 'Robot Karel',
-        bool $includeTags = false
+        string $defaultOwner = 'Robot Karel'
     ) {
         $this->ownerMap = $ownerMap;
         $this->defaultOwner = $defaultOwner;
         $this->customFieldMap = $customFieldMap;
         $this->birthdayFieldId = $birthdayFieldId;
-        $this->includeTags = $includeTags;
     }
 
     /**
@@ -83,12 +78,10 @@ class Transformer
             $subscriber['country'] = $org['billingCountry'] ?? $org['country'] ?? '';
         }
 
-        // Tags from lists (disabled by default until basic sync is stable)
-        if ($this->includeTags) {
-            $tags = $this->buildTags($contact);
-            if (!empty($tags)) {
-                $subscriber['tags'] = $tags;
-            }
+        // Tags from list memberships
+        $tags = $this->buildTags($contact);
+        if (!empty($tags)) {
+            $subscriber['tags'] = $tags;
         }
 
         // Birthday from custom field
