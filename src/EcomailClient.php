@@ -81,24 +81,26 @@ class EcomailClient
             return $result;
         }
 
-        // Log full response for debugging
-        $this->logger->debug("Ecomail subscribe-bulk response", ['response' => $response]);
-
-        // Parse response — Ecomail may return counts or just status
-        $result['imported'] = $response['inserted'] ?? $response['imported'] ?? 0;
-        $result['updated'] = $response['updated'] ?? 0;
-
-        // If no counts returned, assume success for the whole batch
-        if ($result['imported'] === 0 && $result['updated'] === 0) {
-            $result['imported'] = count($subscribers);
-        }
-
-        $this->logger->info("Bulk upsert completed", [
+        // Log raw response so we can see what Ecomail actually returns
+        $this->logger->info("Ecomail subscribe-bulk raw response", [
             'sent' => count($subscribers),
-            'imported' => $result['imported'],
-            'updated' => $result['updated'],
-            'response_keys' => array_keys($response),
+            'response' => $response,
         ]);
+
+        // Parse response — Ecomail returns 'inserted' and 'updated' counts
+        $result['imported'] = (int) ($response['inserted'] ?? $response['imported'] ?? 0);
+        $result['updated'] = (int) ($response['updated'] ?? 0);
+
+        // Do NOT fake counts — if Ecomail says 0, it means 0
+        $skippedByEcomail = count($subscribers) - $result['imported'] - $result['updated'];
+        if ($skippedByEcomail > 0) {
+            $this->logger->warning("Ecomail skipped contacts", [
+                'sent' => count($subscribers),
+                'imported' => $result['imported'],
+                'updated' => $result['updated'],
+                'skipped_by_ecomail' => $skippedByEcomail,
+            ]);
+        }
 
         return $result;
     }
