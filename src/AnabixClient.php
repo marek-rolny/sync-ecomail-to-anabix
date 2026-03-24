@@ -52,7 +52,10 @@ class AnabixClient
      */
     public function getContactsPaginated(?string $changedSince = null, bool $fullInfo = false): \Generator
     {
-        $limit = 100;
+        // Smaller page size when fullInfo is enabled — Anabix responses with
+        // fullInfo can be 10-30 MB per 100 contacts, causing server-side timeouts
+        // at higher offsets. 50 contacts keeps responses under ~15 MB.
+        $limit = $fullInfo ? 50 : 100;
         $offset = 0;
         $page = 0;
         $totalFetched = 0;
