@@ -154,7 +154,8 @@ function output(string $msg): void
 /**
  * Process contact pages from a generator: transform and send to Ecomail in batches.
  *
- * Modifies $report, $orgCache, $subscribers, $batchNum by reference.
+ * Deduplicates by email — each email is sent only once.
+ * Modifies $report, $orgCache, $subscribers, $batchNum, $seenEmails by reference.
  * Returns true if any contacts were processed.
  */
 function processContactPages(
@@ -163,28 +164,29 @@ function processContactPages(
     array &$subscribers,
     int &$batchNum,
     array &$orgCache,
+    array &$seenEmails,
     AnabixClient $anabix,
     EcomailClient $ecomail,
     Transformer $transformer,
+    Logger $logger,
     bool $fetchOrgs,
     bool $fetchDetail,
     int $orgConcurrency,
     int $batchSize
 ): bool {
     $hasContacts = false;
-
     $debugDone = false;
+    $dumpCount = 0;
 
     foreach ($pages as $pageContacts) {
         $hasContacts = true;
         $report['contacts_fetched'] += count($pageContacts);
 
-        // Debug: log structure of first contact to verify lists are present
+        // Debug: log structure of first contact
         if (!$debugDone && !empty($pageContacts)) {
             $first = reset($pageContacts);
-            $listsInfo = isset($first['lists']) ? count($first['lists']) . ' lists' : 'no lists field';
             $cfInfo = isset($first['customFields']) ? count($first['customFields']) . ' custom fields' : 'no customFields';
-            output("  Debug first contact: {$listsInfo}, {$cfInfo}, keys: " . implode(',', array_keys($first)));
+            output("  Debug first contact: {$cfInfo}, keys: " . implode(',', array_keys($first)));
             $debugDone = true;
         }
 
@@ -210,6 +212,14 @@ function processContactPages(
         // Transform contacts from this page
         foreach ($pageContacts as $contact) {
             $contactId = $contact['idContact'] ?? $contact['id'] ?? null;
+            $rawEmail = $contact['email'] ?? '';
+
+            // Count contacts without email
+            if (trim($rawEmail) === '') {
+                $report['skipped_no_email'] = ($report['skipped_no_email'] ?? 0) + 1;
+                $report['skipped']++;
+                continue;
+            }
 
             if ($fetchDetail && $contactId !== null) {
                 $detail = $anabix->getContact((int) $contactId);
@@ -225,8 +235,27 @@ function processContactPages(
             $subscriber = $transformer->transform($contact, $org);
 
             if ($subscriber === null) {
+                $report['skipped_invalid_email'] = ($report['skipped_invalid_email'] ?? 0) + 1;
                 $report['skipped']++;
                 continue;
+            }
+
+            // Deduplicate by email — keep only first occurrence
+            $email = $subscriber['email'];
+            if (isset($seenEmails[$email])) {
+                $report['skipped_duplicate'] = ($report['skipped_duplicate'] ?? 0) + 1;
+                $report['skipped']++;
+                continue;
+            }
+            $seenEmails[$email] = true;
+
+            // Dump first 10 transformed contacts to log
+            if ($dumpCount < 10) {
+                $logger->debug("Sample contact #{$dumpCount}", [
+                    'anabix_id' => $contactId,
+                    'subscriber' => $subscriber,
+                ]);
+                $dumpCount++;
             }
 
             $subscribers[] = $subscriber;
@@ -250,7 +279,7 @@ function processContactPages(
             }
         }
 
-        output("Processed page — total fetched: {$report['contacts_fetched']}");
+        output("Processed page — total fetched: {$report['contacts_fetched']}, unique emails: " . count($seenEmails));
     }
 
     return $hasContacts;
@@ -314,11 +343,12 @@ try {
 
     $subscribers = [];
     $batchNum = 0;
+    $seenEmails = [];  // deduplicate across all pages
 
     $hasContacts = processContactPages(
         $anabix->getContactsPaginated($changedSince, $fetchLists),
-        $report, $subscribers, $batchNum, $orgCache,
-        $anabix, $ecomail, $transformer,
+        $report, $subscribers, $batchNum, $orgCache, $seenEmails,
+        $anabix, $ecomail, $transformer, $logger,
         $fetchOrgs, $fetchDetail, $orgConcurrency, $batchSize
     );
 
@@ -330,8 +360,8 @@ try {
 
         $hasContacts = processContactPages(
             $anabix->getContactsPaginated(null, $fetchLists),
-            $report, $subscribers, $batchNum, $orgCache,
-            $anabix, $ecomail, $transformer,
+            $report, $subscribers, $batchNum, $orgCache, $seenEmails,
+            $anabix, $ecomail, $transformer, $logger,
             $fetchOrgs, $fetchDetail, $orgConcurrency, $batchSize
         );
     }
@@ -353,8 +383,15 @@ try {
         $subscribers = [];
     }
 
-    output("Fetched: {$report['contacts_fetched']} contacts total");
-    output("Transformed: {$report['transformed']} subscribers (skipped: {$report['skipped']})");
+    $uniqueEmails = count($seenEmails);
+    $noEmail = $report['skipped_no_email'] ?? 0;
+    $invalidEmail = $report['skipped_invalid_email'] ?? 0;
+    $duplicates = $report['skipped_duplicate'] ?? 0;
+
+    output("Fetched: {$report['contacts_fetched']} contacts total from Anabix");
+    output("Unique valid emails: {$uniqueEmails}");
+    output("Skipped: {$report['skipped']} (no email: {$noEmail}, invalid email: {$invalidEmail}, duplicate: {$duplicates})");
+    output("Transformed: {$report['transformed']} subscribers");
     output("Sent in {$batchNum} batch(es)");
 
     // Save updated org cache
@@ -408,14 +445,18 @@ finish:
 
 output("");
 output("=== Summary ===");
-output("Mode:         {$report['sync_mode']}");
-output("Fetched:      {$report['contacts_fetched']}");
-output("Transformed:  {$report['transformed']}");
-output("Skipped:      {$report['skipped']}");
-output("Imported:     {$report['imported']}");
-output("Updated:      {$report['updated']}");
-output("Failed:       {$report['failed']}");
-output("Status:       {$report['status']}");
+output("Mode:           {$report['sync_mode']}");
+output("Fetched:        {$report['contacts_fetched']}");
+output("Unique emails:  " . ($report['unique_emails'] ?? count($seenEmails ?? [])));
+output("Transformed:    {$report['transformed']}");
+output("Skipped total:  {$report['skipped']}");
+output("  No email:     " . ($report['skipped_no_email'] ?? 0));
+output("  Invalid email:" . ($report['skipped_invalid_email'] ?? 0));
+output("  Duplicate:    " . ($report['skipped_duplicate'] ?? 0));
+output("Imported:       {$report['imported']}");
+output("Updated:        {$report['updated']}");
+output("Failed:         {$report['failed']}");
+output("Status:         {$report['status']}");
 
 if (!empty($report['errors'])) {
     output("");
@@ -424,6 +465,32 @@ if (!empty($report['errors'])) {
         output("  - {$err}");
     }
 }
+
+// ── Save status for web display ──────────────────────────────────
+
+$statusFile = __DIR__ . '/storage/logs/last_run_status.json';
+$statusDir = dirname($statusFile);
+if (!is_dir($statusDir)) {
+    mkdir($statusDir, 0755, true);
+}
+
+$statusData = [
+    'timestamp' => date('Y-m-d H:i:s'),
+    'mode' => $report['sync_mode'],
+    'fetched' => $report['contacts_fetched'],
+    'unique_emails' => count($seenEmails ?? []),
+    'transformed' => $report['transformed'],
+    'skipped' => $report['skipped'],
+    'skipped_no_email' => $report['skipped_no_email'] ?? 0,
+    'skipped_invalid_email' => $report['skipped_invalid_email'] ?? 0,
+    'skipped_duplicate' => $report['skipped_duplicate'] ?? 0,
+    'imported' => $report['imported'],
+    'updated' => $report['updated'],
+    'failed' => $report['failed'],
+    'status' => $report['status'],
+];
+
+file_put_contents($statusFile, json_encode($statusData, JSON_PRETTY_PRINT) . PHP_EOL, LOCK_EX);
 
 $logger->info("Sync completed", $report);
 
