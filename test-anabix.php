@@ -254,4 +254,83 @@ if ($paginationOk && count($allSeenIds) === $expected) {
     echo "   => FAIL: pagination is broken!\n";
 }
 
-echo "\n=== Pagination test done ===\n";
+echo "\n=== Pagination test done ===\n\n";
+
+// ── Step 6: Dump revisionInfo structure ─────────────────────────────────
+echo "6. RevisionInfo structure (first contact)\n";
+if (is_array($data) && !empty($data)) {
+    $first = reset($data);
+    $revInfo = $first['revisionInfo'] ?? null;
+    if ($revInfo === null) {
+        echo "   revisionInfo: NOT PRESENT\n";
+    } elseif (is_array($revInfo)) {
+        echo "   revisionInfo keys: " . implode(', ', array_keys($revInfo)) . "\n";
+        echo "   " . json_encode($revInfo, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . "\n";
+    } else {
+        echo "   revisionInfo (scalar): " . var_export($revInfo, true) . "\n";
+    }
+    // Also check for top-level timestamp fields
+    $tsFields = ['changedDate', 'dateModified', 'dateCreated', 'modifiedAt', 'createdAt', 'updatedTimestamp', 'createdTimestamp'];
+    $found = [];
+    foreach ($tsFields as $f) {
+        if (isset($first[$f])) {
+            $found[$f] = $first[$f];
+        }
+    }
+    echo "   Top-level timestamp fields: " . (empty($found) ? 'NONE' : json_encode($found)) . "\n";
+}
+echo "\n";
+
+// ── Step 7: Test offset limit — does changedSince or fullInfo cause the 1500 cap? ──
+echo "7. Offset limit test (offset=1500)\n\n";
+
+$tests = [
+    'without changedSince, without fullInfo' => [],
+    'with changedSince, without fullInfo' => ['changedSince' => '2000-01-01T00:00:00+00:00'],
+    'without changedSince, with fullInfo' => ['fullInfo' => 1],
+    'with changedSince, with fullInfo' => ['changedSince' => '2000-01-01T00:00:00+00:00', 'fullInfo' => 1],
+];
+
+foreach ($tests as $label => $extra) {
+    $testData = array_merge(['limit' => 10, 'offset' => 1500], $extra);
+    $testPayload = json_encode([
+        'username' => $username,
+        'token' => $token,
+        'requestType' => 'contacts',
+        'requestMethod' => 'getAll',
+        'data' => $testData,
+    ], JSON_UNESCAPED_UNICODE);
+
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL => $apiUrl,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => ['json' => $testPayload],
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => 30,
+        CURLOPT_CONNECTTIMEOUT => 10,
+    ]);
+
+    $start = microtime(true);
+    $testBody = curl_exec($ch);
+    $elapsed = round(microtime(true) - $start, 2);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    $testResponse = json_decode($testBody, true);
+    $contactCount = 0;
+    if (is_array($testResponse)) {
+        $td = $testResponse['data'] ?? [];
+        if (is_array($td)) {
+            $firstItem = reset($td);
+            $contactCount = is_array($firstItem) ? count($td) : 0;
+        }
+    }
+
+    echo "   {$label}:\n";
+    echo "     HTTP {$httpCode}, {$elapsed}s, {$contactCount} contacts\n";
+
+    usleep(500000);
+}
+
+echo "\n=== Offset limit test done ===\n";
