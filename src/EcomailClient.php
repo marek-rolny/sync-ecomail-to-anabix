@@ -93,14 +93,17 @@ class EcomailClient
         // Store raw response keys and values for debugging
         $result['ecomail_response'] = $response;
 
-        // Do NOT fake counts — if Ecomail says 0, it means 0
-        $skippedByEcomail = count($subscribers) - $result['imported'] - $result['updated'];
-        if ($skippedByEcomail > 0) {
-            $this->logger->warning("Ecomail skipped contacts", [
+        // Ecomail subscribe-bulk only returns {"inserts": N} — it does NOT
+        // report updates separately.  If update_existing is true, existing
+        // contacts are silently updated.  So "skipped" here really means
+        // "already existed and was updated without a separate counter".
+        $unaccounted = count($subscribers) - $result['imported'] - $result['updated'];
+        if ($unaccounted > 0) {
+            $this->logger->info("Ecomail subscribe-bulk result", [
                 'sent' => count($subscribers),
-                'imported' => $result['imported'],
-                'updated' => $result['updated'],
-                'skipped_by_ecomail' => $skippedByEcomail,
+                'new_inserts' => $result['imported'],
+                'already_existing' => $unaccounted,
+                'note' => 'Existing contacts are updated silently; Ecomail does not report update count',
             ]);
         }
 

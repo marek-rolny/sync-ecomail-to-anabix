@@ -160,14 +160,18 @@ if (is_array($data) && !empty($data)) {
 
 echo "=== All checks passed ===\n\n";
 
-// ── Step 5: Pagination test — fetch pages 1-3 ──────────────────────────
-echo "5. Pagination test (pages 1-3, with changedSince=2000-01-01)\n\n";
+// ── Step 5: Pagination smoke test (offset+limit, 3 pages) ────────────────
+echo "5. Pagination test (offset+limit, 3 pages of 50)\n\n";
 
+$testLimit = 50;
 $allSeenIds = [];
-for ($testPage = 1; $testPage <= 3; $testPage++) {
+$paginationOk = true;
+
+for ($testPage = 0; $testPage < 3; $testPage++) {
+    $testOffset = $testPage * $testLimit;
     $testData = [
-        'page' => $testPage,
-        'changedSince' => '2000-01-01T00:00:00+00:00',
+        'limit' => $testLimit,
+        'offset' => $testOffset,
     ];
     $testPayload = json_encode([
         'username' => $username,
@@ -195,121 +199,59 @@ for ($testPage = 1; $testPage <= 3; $testPage++) {
 
     $pageResponse = json_decode($pageBody, true);
 
-    echo "   Page {$testPage}: HTTP {$pageHttpCode}, {$pageElapsed}s, " . strlen($pageBody) . " bytes\n";
+    echo "   offset={$testOffset}, limit={$testLimit}: HTTP {$pageHttpCode}, {$pageElapsed}s, " . strlen($pageBody) . " bytes\n";
 
     if (!is_array($pageResponse)) {
-        echo "   => Invalid JSON, skipping\n\n";
+        echo "   => Invalid JSON\n\n";
+        $paginationOk = false;
         continue;
     }
 
-    // Show response top-level keys
-    $topKeys = array_keys($pageResponse);
-    echo "   Response keys: " . implode(', ', $topKeys) . "\n";
-
-    // Show pagination metadata
-    $pagesVal = $pageResponse['pages'] ?? $pageResponse['totalPages'] ?? 'N/A';
-    $pageVal = $pageResponse['page'] ?? 'N/A';
-    echo "   pages={$pagesVal}, page={$pageVal}\n";
-
     // Extract contacts
     $pageData = $pageResponse['data'] ?? [];
+    $contacts = [];
     if (is_array($pageData) && !empty($pageData)) {
         $firstItem = reset($pageData);
         if (is_array($firstItem)) {
             $contacts = array_values($pageData);
-        } elseif (isset($pageData['idContact'])) {
-            $contacts = [$pageData];
-        } else {
-            $contacts = [];
         }
-    } else {
-        $contacts = [];
     }
 
     echo "   Contacts: " . count($contacts) . "\n";
 
-    // Show first 5 IDs
+    // Show first 3 IDs
     $ids = [];
-    foreach (array_slice($contacts, 0, 5) as $c) {
-        $ids[] = $c['idContact'] ?? $c['id'] ?? '?';
+    foreach (array_slice($contacts, 0, 3) as $c) {
+        $ids[] = $c['idContact'] ?? '?';
     }
-    echo "   First 5 IDs: " . implode(', ', $ids) . "\n";
+    echo "   First 3 IDs: " . implode(', ', $ids) . "\n";
 
-    // Check for duplicates with previous pages
+    // Check for duplicates
     $pageIds = [];
     foreach ($contacts as $c) {
-        $id = $c['idContact'] ?? $c['id'] ?? null;
+        $id = $c['idContact'] ?? null;
         if ($id !== null) $pageIds[] = (int) $id;
     }
     $dupes = array_intersect($pageIds, $allSeenIds);
-    echo "   Duplicates with prev pages: " . count($dupes) . "/" . count($pageIds) . "\n";
-    $allSeenIds = array_merge($allSeenIds, $pageIds);
-    echo "   Total unique IDs so far: " . count(array_unique($allSeenIds)) . "\n\n";
+    $allSeenIds = array_unique(array_merge($allSeenIds, $pageIds));
 
-    usleep(300000); // rate limit
-}
-
-echo "=== Pagination test done ===\n\n";
-
-// ── Step 6: Try different pagination parameters ─────────────────────────
-echo "6. Pagination parameter discovery\n\n";
-
-$paginationTests = [
-    'offset=200'        => ['offset' => 200],
-    'offset=1'          => ['offset' => 1],
-    'limit=5'           => ['limit' => 5],
-    'perPage=5'         => ['perPage' => 5],
-    'count=5'           => ['count' => 5],
-    'pageSize=5'        => ['pageSize' => 5],
-    'start=200'         => ['start' => 200],
-    'from=200'          => ['from' => 200],
-    'page=2,perPage=200' => ['page' => 2, 'perPage' => 200],
-    'page=2,limit=200'  => ['page' => 2, 'limit' => 200],
-    'page=2,count=200'  => ['page' => 2, 'count' => 200],
-];
-
-foreach ($paginationTests as $label => $extraParams) {
-    $testData = array_merge(['page' => 1], $extraParams);
-    $testPayload = json_encode([
-        'username' => $username,
-        'token' => $token,
-        'requestType' => 'contacts',
-        'requestMethod' => 'getAll',
-        'data' => $testData,
-    ], JSON_UNESCAPED_UNICODE);
-
-    $ch = curl_init();
-    curl_setopt_array($ch, [
-        CURLOPT_URL => $apiUrl,
-        CURLOPT_POST => true,
-        CURLOPT_POSTFIELDS => ['json' => $testPayload],
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT => 30,
-        CURLOPT_CONNECTTIMEOUT => 10,
-    ]);
-
-    $pageBody = curl_exec($ch);
-    $pageHttpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-
-    $pageResponse = json_decode($pageBody, true);
-    $pageData = $pageResponse['data'] ?? [];
-    $contactCount = 0;
-    $firstId = '?';
-
-    if (is_array($pageData) && !empty($pageData)) {
-        $firstItem = reset($pageData);
-        if (is_array($firstItem)) {
-            $contactCount = count($pageData);
-            $firstId = $firstItem['idContact'] ?? $firstItem['id'] ?? '?';
-        }
+    echo "   Duplicates: " . count($dupes) . "/" . count($pageIds);
+    if (count($dupes) > 0) {
+        echo " *** PROBLEM: duplicate IDs detected! ***";
+        $paginationOk = false;
     }
-
-    $bytes = strlen($pageBody);
-    $status = $pageResponse['status'] ?? 'N/A';
-    echo "   {$label}: {$contactCount} contacts, firstId={$firstId}, {$bytes}B, status={$status}\n";
+    echo "\n";
+    echo "   Total unique IDs so far: " . count($allSeenIds) . "\n\n";
 
     usleep(300000);
 }
 
-echo "\n=== Parameter discovery done ===\n";
+$expected = $testLimit * 3; // 150 unique IDs expected
+echo "   Result: " . count($allSeenIds) . " unique IDs (expected {$expected})\n";
+if ($paginationOk && count($allSeenIds) === $expected) {
+    echo "   => PASS: offset+limit pagination works correctly\n";
+} else {
+    echo "   => FAIL: pagination is broken!\n";
+}
+
+echo "\n=== Pagination test done ===\n";
