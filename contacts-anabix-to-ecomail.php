@@ -269,9 +269,13 @@ function processContactPages(
             $rawEmail = $contact['email'] ?? '';
 
             // Count contacts without email
+            $contactName = trim(($contact['firstName'] ?? '') . ' ' . ($contact['lastName'] ?? ''));
             if (trim($rawEmail) === '') {
                 $report['skipped_no_email'] = ($report['skipped_no_email'] ?? 0) + 1;
                 $report['skipped']++;
+                $report['skipped_contacts'][] = [
+                    'id' => $contactId, 'name' => $contactName, 'reason' => 'no_email',
+                ];
                 continue;
             }
 
@@ -283,6 +287,10 @@ function processContactPages(
             if ($subscriber === null) {
                 $report['skipped_invalid_email'] = ($report['skipped_invalid_email'] ?? 0) + 1;
                 $report['skipped']++;
+                $report['skipped_contacts'][] = [
+                    'id' => $contactId, 'name' => $contactName,
+                    'email' => $rawEmail, 'reason' => 'invalid_email',
+                ];
                 continue;
             }
 
@@ -291,6 +299,10 @@ function processContactPages(
             if (isset($seenEmails[$email])) {
                 $report['skipped_duplicate'] = ($report['skipped_duplicate'] ?? 0) + 1;
                 $report['skipped']++;
+                $report['skipped_contacts'][] = [
+                    'id' => $contactId, 'name' => $contactName,
+                    'email' => $email, 'reason' => 'duplicate',
+                ];
                 continue;
             }
             $seenEmails[$email] = true;
@@ -367,6 +379,7 @@ $report = [
     'updated' => 0,
     'failed' => 0,
     'errors' => [],
+    'skipped_contacts' => [],
 ];
 
 try {
@@ -541,6 +554,14 @@ try {
     output("Transformed: {$report['transformed']} subscribers");
     output("Sent in {$batchNum} batch(es)");
 
+    // Log skipped contacts list for review
+    if (!empty($report['skipped_contacts'])) {
+        $logger->info("Skipped contacts detail", [
+            'count' => count($report['skipped_contacts']),
+            'contacts' => $report['skipped_contacts'],
+        ]);
+    }
+
     // Save updated org cache
     if ($fetchOrgs && !empty($orgCache)) {
         $cacheDir = dirname($orgCacheFile);
@@ -640,9 +661,13 @@ $statusData = [
 
 file_put_contents($statusFile, json_encode($statusData, JSON_PRETTY_PRINT) . PHP_EOL, LOCK_EX);
 
+// Log full report (including skipped_contacts detail) then strip it for CLI output
 $logger->info("Sync completed", $report);
 
 // JSON output (CLI only — in web mode the connection is already closed)
 if (!$isWeb) {
-    echo json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . PHP_EOL;
+    // Exclude large skipped_contacts list from CLI output (it's in the log)
+    $cliReport = $report;
+    unset($cliReport['skipped_contacts']);
+    echo json_encode($cliReport, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . PHP_EOL;
 }
