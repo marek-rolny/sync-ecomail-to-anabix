@@ -209,10 +209,12 @@ function processContactPages(
             $neededOrgIds = array_keys($neededOrgIds);
 
             if (!empty($neededOrgIds)) {
+                $logger->info("Fetching organizations for page {$pageNum}", ['count' => count($neededOrgIds)]);
                 $fetched = $anabix->getOrganizationsParallel($neededOrgIds, $orgConcurrency);
                 foreach ($fetched as $orgId => $orgData) {
                     $orgCache[$orgId] = $orgData;
                 }
+                $logger->info("Organizations fetched for page {$pageNum}", ['fetched' => count($fetched)]);
             }
         }
 
@@ -271,6 +273,7 @@ function processContactPages(
             if (count($subscribers) >= $batchSize) {
                 $batchNum++;
                 $report['transformed'] += count($subscribers);
+                $logger->info("Sending Ecomail batch {$batchNum}", ['count' => count($subscribers)]);
                 output("  Batch {$batchNum} (" . count($subscribers) . " subscribers)");
 
                 $result = $ecomail->bulkUpsertContacts($subscribers);
@@ -291,6 +294,11 @@ function processContactPages(
             }
         }
 
+        $logger->info("Processed page {$pageNum}", [
+            'total_fetched' => $report['contacts_fetched'],
+            'unique_emails' => count($seenEmails),
+            'buffer' => count($subscribers),
+        ]);
         output("Processed page — total fetched: {$report['contacts_fetched']}, unique emails: " . count($seenEmails));
     }
 
@@ -392,6 +400,7 @@ try {
     if (!empty($subscribers)) {
         $batchNum++;
         $report['transformed'] += count($subscribers);
+        $logger->info("Sending final Ecomail batch {$batchNum}", ['count' => count($subscribers)]);
         output("  Batch {$batchNum} (" . count($subscribers) . " subscribers)");
 
         $result = $ecomail->bulkUpsertContacts($subscribers);

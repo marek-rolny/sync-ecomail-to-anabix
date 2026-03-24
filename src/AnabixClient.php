@@ -24,7 +24,7 @@ class AnabixClient
     private Logger $logger;
 
     private const MAX_RETRIES = 3;
-    private const RETRY_BASE_DELAY = 3; // seconds — linear: 3s, 6s, 9s
+    private const RETRY_BASE_DELAY = 2; // seconds — exponential: 2s, 4s, 8s
 
     public function __construct(string $user, string $token, string $apiUrl, Logger $logger)
     {
@@ -68,7 +68,10 @@ class AnabixClient
                 $data['fullInfo'] = 1;
             }
 
-            $response = $this->request('contacts', 'getAll', $data);
+            // After first successful page, use only 1 retry — Anabix returns
+            // HTTP 500 when offset exceeds total contacts, so retrying wastes time.
+            $retries = $totalFetched > 0 ? 1 : self::MAX_RETRIES;
+            $response = $this->request('contacts', 'getAll', $data, $retries);
 
             if ($response === null) {
                 if ($totalFetched > 0) {
@@ -437,8 +440,10 @@ class AnabixClient
     /**
      * Send a request to the Anabix API with retry on transient errors.
      */
-    private function request(string $requestType, string $requestMethod, array $data = []): ?array
+    private function request(string $requestType, string $requestMethod, array $data = [], ?int $maxRetries = null): ?array
     {
+        $maxRetries = $maxRetries ?? self::MAX_RETRIES;
+
         $payload = json_encode([
             'username' => $this->user,
             'token' => $this->token,
@@ -447,7 +452,7 @@ class AnabixClient
             'data' => $data,
         ], JSON_UNESCAPED_UNICODE);
 
-        for ($attempt = 1; $attempt <= self::MAX_RETRIES; $attempt++) {
+        for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
             $ch = curl_init();
             curl_setopt_array($ch, [
                 CURLOPT_URL => $this->apiUrl,
@@ -465,13 +470,14 @@ class AnabixClient
 
             // cURL transport error
             if ($error) {
-                $this->logger->warning("Anabix API cURL error (attempt {$attempt})", [
+                $this->logger->warning("Anabix API cURL error (attempt {$attempt}/{$maxRetries})", [
                     'error' => $error,
                     'type' => $requestType,
                     'method' => $requestMethod,
                 ]);
-                if ($attempt < self::MAX_RETRIES) {
-                    sleep(self::RETRY_BASE_DELAY * $attempt);
+                if ($attempt < $maxRetries) {
+                    $delay = (int) pow(self::RETRY_BASE_DELAY, $attempt); // 2s, 4s, 8s
+                    sleep($delay);
                     continue;
                 }
                 $this->logger->error("Anabix API cURL error after all retries", ['error' => $error]);
@@ -480,13 +486,14 @@ class AnabixClient
 
             // Transient HTTP errors — retry
             if (in_array($httpCode, [408, 429, 500, 502, 503, 504], true)) {
-                $this->logger->warning("Anabix API transient HTTP error (attempt {$attempt})", [
+                $this->logger->warning("Anabix API transient HTTP error (attempt {$attempt}/{$maxRetries})", [
                     'http_code' => $httpCode,
                     'type' => $requestType,
                     'method' => $requestMethod,
                 ]);
-                if ($attempt < self::MAX_RETRIES) {
-                    sleep(self::RETRY_BASE_DELAY * $attempt);
+                if ($attempt < $maxRetries) {
+                    $delay = (int) pow(self::RETRY_BASE_DELAY, $attempt); // 2s, 4s, 8s
+                    sleep($delay);
                     continue;
                 }
                 $this->logger->error("Anabix API HTTP error after all retries", ['http_code' => $httpCode]);
