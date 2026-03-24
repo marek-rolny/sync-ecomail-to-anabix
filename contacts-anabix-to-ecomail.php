@@ -124,11 +124,6 @@ $birthdayFieldId = env('ANABIX_BIRTHDAY_FIELD_ID', '') !== ''
     ? (int) env('ANABIX_BIRTHDAY_FIELD_ID')
     : null;
 
-// Default owner: ANABIX_OWNER_6 ("Robot Karel") — used when contact's idOwner is not in the map
-$defaultOwner = $ownerMap[6] ?? 'Robot Karel';
-
-$transformer = new Transformer($ownerMap, $customFieldMap, $birthdayFieldId, $defaultOwner, $fetchLists);
-
 // ── Runtime options ───────────────────────────────────────────────────
 
 $fetchDetail = env('ANABIX_FETCH_DETAIL', 'false') === 'true';
@@ -139,6 +134,11 @@ $orgCacheFile = env('ANABIX_ORG_CACHE_FILE', __DIR__ . '/storage/state/org_cache
 $batchSize = (int) env('ECOMAIL_BATCH_SIZE', '500');
 $lookbackMinutes = (int) env('SYNC_LOOKBACK_MINUTES', '60');
 $forceSince = env('SYNC_FORCE_SINCE', '') ?: null;
+
+// Default owner: ANABIX_OWNER_6 ("Robot Karel") — used when contact's idOwner is not in the map
+$defaultOwner = $ownerMap[6] ?? 'Robot Karel';
+
+$transformer = new Transformer($ownerMap, $customFieldMap, $birthdayFieldId, $defaultOwner, $fetchLists);
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -287,7 +287,7 @@ function processContactPages(
 
 // ── Run sync ──────────────────────────────────────────────────────────
 
-output("=== Anabix → Ecomail contact sync ===");
+output("=== Anabix → Ecomail contact sync (v2024-03-24b) ===");
 
 $report = [
     'status' => 'ok',
