@@ -433,9 +433,9 @@ try {
 
     // ── Step 7: Save state ────────────────────────────────────────────
 
-    // Only save state if something was actually processed and no failures occurred
+    // Only save state if Ecomail confirmed imports/updates and no failures
     $totalProcessed = $report['imported'] + $report['updated'];
-    if ($report['failed'] === 0 && ($totalProcessed > 0 || $report['transformed'] > 0)) {
+    if ($report['failed'] === 0 && $totalProcessed > 0) {
         $syncState->markCompleted();
         $syncState->save();
         output("Sync state saved.");

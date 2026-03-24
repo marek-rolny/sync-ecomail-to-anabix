@@ -87,9 +87,9 @@ class EcomailClient
             'response' => $response,
         ]);
 
-        // Parse response — Ecomail returns 'inserted' and 'updated' counts
-        $result['imported'] = (int) ($response['inserted'] ?? $response['imported'] ?? 0);
-        $result['updated'] = (int) ($response['updated'] ?? 0);
+        // Parse response — Ecomail returns 'inserts' (not 'inserted')
+        $result['imported'] = (int) ($response['inserts'] ?? $response['inserted'] ?? $response['imported'] ?? 0);
+        $result['updated'] = (int) ($response['updated'] ?? $response['updates'] ?? 0);
         // Store raw response keys and values for debugging
         $result['ecomail_response'] = $response;
 
