@@ -54,6 +54,7 @@ class AnabixClient
     {
         $page = 1;
         $totalFetched = 0;
+        $seenIds = [];
 
         while (true) {
             $data = ['page' => $page];
@@ -71,10 +72,35 @@ class AnabixClient
                 break;
             }
 
+            // Read pagination metadata before extracting list
+            $totalPages = $response['pages'] ?? $response['totalPages'] ?? null;
+
             $contacts = $this->extractList($response);
 
             if (empty($contacts)) {
                 break;
+            }
+
+            // Detect loop: if we see the same contact IDs again, Anabix is cycling
+            $pageIds = [];
+            foreach ($contacts as $c) {
+                $id = $c['idContact'] ?? $c['id'] ?? null;
+                if ($id !== null) {
+                    $pageIds[] = (int) $id;
+                }
+            }
+            if (!empty($pageIds)) {
+                $newIds = array_diff($pageIds, array_keys($seenIds));
+                if (empty($newIds)) {
+                    $this->logger->info("Pagination loop detected, stopping", [
+                        'page' => $page,
+                        'total_unique' => count($seenIds),
+                    ]);
+                    break;
+                }
+                foreach ($pageIds as $id) {
+                    $seenIds[$id] = true;
+                }
             }
 
             $totalFetched += count($contacts);
@@ -83,9 +109,17 @@ class AnabixClient
                 'page' => $page,
                 'count' => count($contacts),
                 'total' => $totalFetched,
+                'unique_ids' => count($seenIds),
+                'total_pages' => $totalPages,
             ]);
 
             yield $contacts;
+
+            // Stop if we've reached the last page (from API metadata)
+            if ($totalPages !== null && $page >= (int) $totalPages) {
+                $this->logger->info("Reached last page", ['page' => $page, 'totalPages' => $totalPages]);
+                break;
+            }
 
             $page++;
 
