@@ -23,8 +23,8 @@ class AnabixClient
     private string $apiUrl;
     private Logger $logger;
 
-    private const MAX_RETRIES = 3;
-    private const RETRY_BASE_DELAY = 2; // seconds
+    private const MAX_RETRIES = 5;
+    private const RETRY_BASE_DELAY = 3; // seconds
 
     public function __construct(string $user, string $token, string $apiUrl, Logger $logger)
     {
@@ -52,7 +52,7 @@ class AnabixClient
      */
     public function getContactsPaginated(?string $changedSince = null, bool $fullInfo = false): \Generator
     {
-        $limit = 200;
+        $limit = 100;
         $offset = 0;
         $page = 0;
         $totalFetched = 0;
@@ -129,8 +129,8 @@ class AnabixClient
 
             $offset += $limit;
 
-            // Rate limiting
-            usleep(200000);
+            // Rate limiting — longer pause to avoid overloading Anabix
+            usleep(500000);
         }
     }
 
@@ -444,8 +444,8 @@ class AnabixClient
                 CURLOPT_POST => true,
                 CURLOPT_POSTFIELDS => ['json' => $payload],
                 CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_TIMEOUT => 30,
-                CURLOPT_CONNECTTIMEOUT => 10,
+                CURLOPT_TIMEOUT => 60,
+                CURLOPT_CONNECTTIMEOUT => 15,
             ]);
 
             $responseBody = curl_exec($ch);
@@ -461,7 +461,7 @@ class AnabixClient
                     'method' => $requestMethod,
                 ]);
                 if ($attempt < self::MAX_RETRIES) {
-                    sleep(self::RETRY_BASE_DELAY ** $attempt);
+                    sleep(self::RETRY_BASE_DELAY * $attempt);
                     continue;
                 }
                 $this->logger->error("Anabix API cURL error after all retries", ['error' => $error]);
@@ -476,7 +476,7 @@ class AnabixClient
                     'method' => $requestMethod,
                 ]);
                 if ($attempt < self::MAX_RETRIES) {
-                    sleep(self::RETRY_BASE_DELAY ** $attempt);
+                    sleep(self::RETRY_BASE_DELAY * $attempt);
                     continue;
                 }
                 $this->logger->error("Anabix API HTTP error after all retries", ['http_code' => $httpCode]);
