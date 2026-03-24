@@ -235,7 +235,13 @@ function processContactPages(
         if (!$debugDone && !empty($pageContacts)) {
             $first = reset($pageContacts);
             $cfInfo = isset($first['customFields']) ? count($first['customFields']) . ' custom fields' : 'no customFields';
-            output("  Debug first contact: {$cfInfo}, keys: " . implode(',', array_keys($first)));
+            $revInfo = $first['revisionInfo'] ?? null;
+            $revKeys = is_array($revInfo) ? implode(',', array_keys($revInfo)) : 'missing';
+            output("  Debug first contact: {$cfInfo}, revisionInfo keys: [{$revKeys}]");
+            $logger->info("First contact structure", [
+                'keys' => array_keys($first),
+                'revisionInfo' => $revInfo,
+            ]);
             $debugDone = true;
         }
 
@@ -303,10 +309,12 @@ function processContactPages(
             // Track latest contact timestamp for cursor-based pagination
             // Anabix API has an offset limit (~1500); to fetch all contacts,
             // we restart pagination using the latest changedDate as cursor.
+            // Timestamp may be at top-level (changedDate) or nested in revisionInfo.
+            $revInfo = $contact['revisionInfo'] ?? [];
             $contactTimestamp = $contact['changedDate']
                 ?? $contact['updatedTimestamp']
                 ?? $contact['createdTimestamp']
-                ?? null;
+                ?? (is_array($revInfo) ? ($revInfo['updatedTimestamp'] ?? $revInfo['createdTimestamp'] ?? null) : null);
             if ($contactTimestamp !== null && ($maxTimestamp === null || (string) $contactTimestamp > (string) $maxTimestamp)) {
                 $maxTimestamp = (string) $contactTimestamp;
             }
