@@ -249,4 +249,67 @@ for ($testPage = 1; $testPage <= 3; $testPage++) {
     usleep(300000); // rate limit
 }
 
-echo "=== Pagination test done ===\n";
+echo "=== Pagination test done ===\n\n";
+
+// ── Step 6: Try different pagination parameters ─────────────────────────
+echo "6. Pagination parameter discovery\n\n";
+
+$paginationTests = [
+    'offset=200'        => ['offset' => 200],
+    'offset=1'          => ['offset' => 1],
+    'limit=5'           => ['limit' => 5],
+    'perPage=5'         => ['perPage' => 5],
+    'count=5'           => ['count' => 5],
+    'pageSize=5'        => ['pageSize' => 5],
+    'start=200'         => ['start' => 200],
+    'from=200'          => ['from' => 200],
+    'page=2,perPage=200' => ['page' => 2, 'perPage' => 200],
+    'page=2,limit=200'  => ['page' => 2, 'limit' => 200],
+    'page=2,count=200'  => ['page' => 2, 'count' => 200],
+];
+
+foreach ($paginationTests as $label => $extraParams) {
+    $testData = array_merge(['page' => 1], $extraParams);
+    $testPayload = json_encode([
+        'username' => $username,
+        'token' => $token,
+        'requestType' => 'contacts',
+        'requestMethod' => 'getAll',
+        'data' => $testData,
+    ], JSON_UNESCAPED_UNICODE);
+
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL => $apiUrl,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => ['json' => $testPayload],
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => 30,
+        CURLOPT_CONNECTTIMEOUT => 10,
+    ]);
+
+    $pageBody = curl_exec($ch);
+    $pageHttpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    $pageResponse = json_decode($pageBody, true);
+    $pageData = $pageResponse['data'] ?? [];
+    $contactCount = 0;
+    $firstId = '?';
+
+    if (is_array($pageData) && !empty($pageData)) {
+        $firstItem = reset($pageData);
+        if (is_array($firstItem)) {
+            $contactCount = count($pageData);
+            $firstId = $firstItem['idContact'] ?? $firstItem['id'] ?? '?';
+        }
+    }
+
+    $bytes = strlen($pageBody);
+    $status = $pageResponse['status'] ?? 'N/A';
+    echo "   {$label}: {$contactCount} contacts, firstId={$firstId}, {$bytes}B, status={$status}\n";
+
+    usleep(300000);
+}
+
+echo "\n=== Parameter discovery done ===\n";
