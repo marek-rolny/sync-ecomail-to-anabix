@@ -178,9 +178,15 @@ function processContactPages(
     $debugDone = false;
     $dumpCount = 0;
 
+    $pageNum = 0;
     foreach ($pages as $pageContacts) {
+        $pageNum++;
         $hasContacts = true;
         $report['contacts_fetched'] += count($pageContacts);
+
+        // Debug: show page info and first few contact IDs
+        $ids = array_map(fn($c) => $c['idContact'] ?? $c['id'] ?? '?', array_slice($pageContacts, 0, 5));
+        output("  Page {$pageNum}: " . count($pageContacts) . " contacts, first IDs: " . implode(',', $ids));
 
         // Debug: log structure of first contact
         if (!$debugDone && !empty($pageContacts)) {
