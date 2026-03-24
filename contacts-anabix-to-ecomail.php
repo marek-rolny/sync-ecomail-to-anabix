@@ -311,19 +311,23 @@ try {
     // Support ?mode=full in URL to force full sync from browser
     $urlMode = $_GET['mode'] ?? '';
     if ($urlMode === 'full') {
-        $forceSince = null;
-        $syncState = new SyncState('/dev/null'); // ignore saved state
-        output("Full sync forced via ?mode=full");
+        // Anabix API requires changedSince for proper pagination.
+        // Use a very old date to get all contacts.
+        $changedSince = '2000-01-01T00:00:00+00:00';
+        $report['sync_mode'] = 'full';
+        output("Full sync forced via ?mode=full (changedSince={$changedSince})");
+    } else {
+        $changedSince = $syncState->getChangedSince($forceSince, $lookbackMinutes);
     }
 
-    $changedSince = $syncState->getChangedSince($forceSince, $lookbackMinutes);
-
-    if ($changedSince !== null) {
+    if ($changedSince === null) {
+        // No previous state — also use old date for same reason
+        $changedSince = '2000-01-01T00:00:00+00:00';
+        $report['sync_mode'] = 'full';
+        output("Full sync (no previous state, changedSince={$changedSince})");
+    } elseif ($report['sync_mode'] !== 'full') {
         $report['sync_mode'] = 'delta';
         output("Delta sync: changes since {$changedSince}");
-    } else {
-        $report['sync_mode'] = 'full';
-        output("Full sync (no previous state)");
     }
 
     $logger->info("Starting sync", [
@@ -362,14 +366,15 @@ try {
         $fetchOrgs, $fetchDetail, $orgConcurrency, $batchSize
     );
 
-    // Fallback: delta returned 0 → try full export
-    if (!$hasContacts && $changedSince !== null) {
-        output("Delta returned 0 contacts, falling back to full export...");
+    // Fallback: delta returned 0 → try full export with old date
+    if (!$hasContacts) {
+        $fallbackSince = '2000-01-01T00:00:00+00:00';
+        output("Delta returned 0 contacts, falling back to full export (changedSince={$fallbackSince})...");
         $logger->info("Delta empty, falling back to full export");
         $report['sync_mode'] = 'full_fallback';
 
         $hasContacts = processContactPages(
-            $anabix->getContactsPaginated(null, true),
+            $anabix->getContactsPaginated($fallbackSince, true),
             $report, $subscribers, $batchNum, $orgCache, $seenEmails,
             $anabix, $ecomail, $transformer, $logger,
             $fetchOrgs, $fetchDetail, $orgConcurrency, $batchSize
