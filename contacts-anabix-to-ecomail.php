@@ -215,7 +215,7 @@ function processContactPages(
     bool $fetchDetail,
     int $orgConcurrency,
     int $batchSize,
-    ?string &$maxTimestamp = null
+    ?int &$maxTimestamp = null
 ): bool {
     $hasContacts = false;
     $debugDone = false;
@@ -306,17 +306,15 @@ function processContactPages(
             }
             $seenEmails[$email] = true;
 
-            // Track latest contact timestamp for cursor-based pagination
-            // Anabix API has an offset limit (~1500); to fetch all contacts,
-            // we restart pagination using the latest changedDate as cursor.
-            // Timestamp may be at top-level (changedDate) or nested in revisionInfo.
+            // Track latest contact timestamp for cursor-based pagination.
+            // revisionInfo.updatedTimestamp is a Unix timestamp (integer).
             $revInfo = $contact['revisionInfo'] ?? [];
-            $contactTimestamp = $contact['changedDate']
-                ?? $contact['updatedTimestamp']
-                ?? $contact['createdTimestamp']
-                ?? (is_array($revInfo) ? ($revInfo['updatedTimestamp'] ?? $revInfo['createdTimestamp'] ?? null) : null);
-            if ($contactTimestamp !== null && ($maxTimestamp === null || (string) $contactTimestamp > (string) $maxTimestamp)) {
-                $maxTimestamp = (string) $contactTimestamp;
+            $contactTs = is_array($revInfo) ? ($revInfo['updatedTimestamp'] ?? $revInfo['createdTimestamp'] ?? null) : null;
+            if ($contactTs !== null) {
+                $contactTs = (int) $contactTs;
+                if ($maxTimestamp === null || $contactTs > $maxTimestamp) {
+                    $maxTimestamp = $contactTs;
+                }
             }
 
             // Dump first 10 transformed contacts to log
@@ -472,18 +470,13 @@ try {
         ]);
 
         // Continue if: we got contacts AND have a timestamp cursor to advance
-        // AND fetched a meaningful number (suggests we hit the API offset limit)
-        if ($maxTimestamp !== null && $fetchedThisPass >= 100) {
-            // Advance cursor by 1 second to avoid re-fetching the last contact
-            try {
-                $dt = new \DateTimeImmutable($maxTimestamp);
-                $cursorSince = $dt->modify('+1 second')->format('Y-m-d H:i:s');
-            } catch (\Exception $e) {
-                $cursorSince = $maxTimestamp;
-            }
+        // AND fetched a meaningful number (suggests we hit the API response size limit)
+        if ($maxTimestamp !== null && $fetchedThisPass >= 50) {
+            // maxTimestamp is a Unix timestamp (int) — convert to datetime + 1 second
+            $cursorSince = date('Y-m-d H:i:s', $maxTimestamp + 1);
             output("Cursor advanced to {$cursorSince} (fetched {$fetchedThisPass} this pass, {$report['contacts_fetched']} total)");
         } else {
-            break; // No more contacts or too few to suggest an offset limit
+            break; // No more contacts or too few to suggest a limit
         }
     } while ($pass < $maxPasses);
 
@@ -520,13 +513,8 @@ try {
 
             $fetchedThisPass = $report['contacts_fetched'] - $prevFetched;
 
-            if ($maxTimestamp !== null && $fetchedThisPass >= 100) {
-                try {
-                    $dt = new \DateTimeImmutable($maxTimestamp);
-                    $cursorSince = $dt->modify('+1 second')->format('Y-m-d H:i:s');
-                } catch (\Exception $e) {
-                    $cursorSince = $maxTimestamp;
-                }
+            if ($maxTimestamp !== null && $fetchedThisPass >= 50) {
+                $cursorSince = date('Y-m-d H:i:s', $maxTimestamp + 1);
                 output("Fallback cursor advanced to {$cursorSince} (fetched {$fetchedThisPass} this pass)");
             } else {
                 break;
