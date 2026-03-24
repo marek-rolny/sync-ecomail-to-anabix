@@ -105,15 +105,11 @@ class AnabixClient
                     $seenIds[$id] = true;
                 }
                 if (empty($newIds)) {
-                    $this->logger->warning("Pagination loop detected on page {$page}, but continuing (debug mode)", [
+                    $this->logger->info("Pagination loop detected, stopping", [
                         'page' => $page,
                         'total_unique' => count($seenIds),
                     ]);
-                    // In debug mode: stop after 15 pages max to prevent infinite loop
-                    if ($page >= 15) {
-                        $this->logger->info("Hard stop at page 15 (debug limit)");
-                        break;
-                    }
+                    break;
                 }
             }
 
@@ -130,13 +126,8 @@ class AnabixClient
             yield $contacts;
 
             // Stop if we've reached the last page (from API metadata)
-            // DEBUG: temporarily disabled — Anabix may report wrong totalPages
-            // if ($totalPages !== null && $page >= (int) $totalPages) {
-            //     $this->logger->info("Reached last page", ['page' => $page, 'totalPages' => $totalPages]);
-            //     break;
-            // }
-            // Hard limit: 15 pages (debug)
-            if ($page >= 15) {
+            if ($totalPages !== null && $page >= (int) $totalPages) {
+                $this->logger->info("Reached last page", ['page' => $page, 'totalPages' => $totalPages]);
                 break;
             }
 
