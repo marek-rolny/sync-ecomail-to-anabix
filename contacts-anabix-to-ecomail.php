@@ -274,6 +274,11 @@ function processContactPages(
                     $report['errors'][] = "Batch {$batchNum}: {$err}";
                 }
 
+                // Show Ecomail raw response for debugging
+                if (isset($result['ecomail_response'])) {
+                    output("  Ecomail response: " . json_encode($result['ecomail_response'], JSON_UNESCAPED_UNICODE));
+                }
+
                 $subscribers = []; // free memory
                 sleep(2); // rate limiting
             }
@@ -287,7 +292,7 @@ function processContactPages(
 
 // ── Run sync ──────────────────────────────────────────────────────────
 
-output("=== Anabix → Ecomail contact sync (v2024-03-24b) ===");
+output("=== Anabix → Ecomail contact sync (v2026-03-24c) ===");
 
 $report = [
     'status' => 'ok',
@@ -303,6 +308,13 @@ $report = [
 
 try {
     // ── Step 1: Determine sync window ─────────────────────────────────
+    // Support ?mode=full in URL to force full sync from browser
+    $urlMode = $_GET['mode'] ?? '';
+    if ($urlMode === 'full') {
+        $forceSince = null;
+        $syncState = new SyncState('/dev/null'); // ignore saved state
+        output("Full sync forced via ?mode=full");
+    }
 
     $changedSince = $syncState->getChangedSince($forceSince, $lookbackMinutes);
 
@@ -335,18 +347,16 @@ try {
     // When fetchLists is enabled, we request fullInfo so contact lists
     // (used as Ecomail tags) are included in the getAll response.
 
-    if ($fetchLists) {
-        output("Fetching contacts with list memberships (fullInfo)...");
-    } else {
-        output("Fetching contacts from Anabix (page-by-page)...");
-    }
+    // Always use fullInfo=1 to get customFields and lists data from Anabix.
+    // $fetchLists controls only whether list names become Ecomail tags.
+    output("Fetching contacts from Anabix (fullInfo)...");
 
     $subscribers = [];
     $batchNum = 0;
     $seenEmails = [];  // deduplicate across all pages
 
     $hasContacts = processContactPages(
-        $anabix->getContactsPaginated($changedSince, $fetchLists),
+        $anabix->getContactsPaginated($changedSince, true),
         $report, $subscribers, $batchNum, $orgCache, $seenEmails,
         $anabix, $ecomail, $transformer, $logger,
         $fetchOrgs, $fetchDetail, $orgConcurrency, $batchSize
@@ -359,7 +369,7 @@ try {
         $report['sync_mode'] = 'full_fallback';
 
         $hasContacts = processContactPages(
-            $anabix->getContactsPaginated(null, $fetchLists),
+            $anabix->getContactsPaginated(null, true),
             $report, $subscribers, $batchNum, $orgCache, $seenEmails,
             $anabix, $ecomail, $transformer, $logger,
             $fetchOrgs, $fetchDetail, $orgConcurrency, $batchSize
@@ -378,6 +388,11 @@ try {
         $report['failed'] += $result['failed'];
         foreach ($result['errors'] as $err) {
             $report['errors'][] = "Batch {$batchNum}: {$err}";
+        }
+
+        // Show Ecomail raw response for debugging
+        if (isset($result['ecomail_response'])) {
+            output("  Ecomail response: " . json_encode($result['ecomail_response'], JSON_UNESCAPED_UNICODE));
         }
 
         $subscribers = [];
@@ -418,8 +433,9 @@ try {
 
     // ── Step 7: Save state ────────────────────────────────────────────
 
-    // Only save state if no failures occurred
-    if ($report['failed'] === 0) {
+    // Only save state if something was actually processed and no failures occurred
+    $totalProcessed = $report['imported'] + $report['updated'];
+    if ($report['failed'] === 0 && ($totalProcessed > 0 || $report['transformed'] > 0)) {
         $syncState->markCompleted();
         $syncState->save();
         output("Sync state saved.");
