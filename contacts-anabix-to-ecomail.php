@@ -72,6 +72,9 @@ require_once __DIR__ . '/src/SyncState.php';
 require_once __DIR__ . '/src/AnabixClient.php';
 require_once __DIR__ . '/src/EcomailClient.php';
 require_once __DIR__ . '/src/Transformer.php';
+require_once __DIR__ . '/src/Normalizer.php';
+require_once __DIR__ . '/src/CheckpointManager.php';
+require_once __DIR__ . '/src/RetryExecutor.php';
 
 // ── Prevent concurrent runs ──────────────────────────────────────────
 $lockFile = __DIR__ . '/storage/state/sync.lock';
@@ -180,6 +183,8 @@ $defaultOwner = $ownerMap[6] ?? 'Robot Karel';
 
 $transformer = new Transformer($ownerMap, $customFieldMap, $birthdayFieldId, $defaultOwner);
 
+$checkpoint = new CheckpointManager(__DIR__ . '/storage/state');
+
 // ── Helpers ───────────────────────────────────────────────────────────
 
 function output(string $msg): void
@@ -212,17 +217,47 @@ function processContactPages(
     bool $fetchOrgs,
     int $orgConcurrency,
     int $batchSize,
-    ?int &$maxTimestamp = null
+    ?int &$maxTimestamp = null,
+    ?CheckpointManager $checkpoint = null,
+    ?int $resumeFromOffset = null
 ): bool {
     $hasContacts = false;
     $debugDone = false;
     $dumpCount = 0;
+    $resumeSkipped = 0;
 
     $pageNum = 0;
     foreach ($pages as $pageContacts) {
         $pageNum++;
         $hasContacts = true;
         $report['contacts_fetched'] += count($pageContacts);
+
+        // Resume logic: skip pages we already processed (based on checkpoint offset)
+        if ($resumeFromOffset !== null && $report['contacts_fetched'] <= $resumeFromOffset) {
+            $resumeSkipped += count($pageContacts);
+            // Still track emails for dedup even when skipping
+            foreach ($pageContacts as $c) {
+                $resolved = $transformer->resolveEmail($c);
+                if ($resolved !== null) {
+                    $cId = $c['idContact'] ?? $c['id'] ?? null;
+                    $seenEmails[$resolved['email']] = $cId;
+                }
+            }
+            $logger->debug("Skipping page {$pageNum} (checkpoint resume)", [
+                'fetched' => $report['contacts_fetched'],
+                'resume_offset' => $resumeFromOffset,
+            ]);
+            continue;
+        }
+        if ($resumeSkipped > 0) {
+            $logger->info("Resumed after checkpoint", [
+                'skipped_contacts' => $resumeSkipped,
+                'continuing_from' => $report['contacts_fetched'] - count($pageContacts),
+            ]);
+            output("Resumed: skipped {$resumeSkipped} already-processed contacts");
+            $resumeSkipped = 0; // only log once
+            $resumeFromOffset = null;
+        }
 
         // Debug: show page info and first few contact IDs
         $ids = array_map(fn($c) => $c['idContact'] ?? $c['id'] ?? '?', array_slice($pageContacts, 0, 5));
@@ -319,7 +354,7 @@ function processContactPages(
                 continue;
             }
 
-            // Deduplicate by email — keep only first occurrence
+            // Deduplicate by email — keep only first occurrence, log conflict
             $email = $subscriber['email'];
             if (isset($seenEmails[$email])) {
                 $report['skipped_duplicate'] = ($report['skipped_duplicate'] ?? 0) + 1;
@@ -328,9 +363,15 @@ function processContactPages(
                     'id' => $contactId, 'name' => $contactName,
                     'email' => $email, 'reason' => 'duplicate',
                 ];
+                $logger->info("Duplicate contact skipped", [
+                    'email' => $email,
+                    'kept_anabix_id' => $seenEmails[$email],
+                    'skipped_anabix_id' => $contactId,
+                    'skipped_name' => $contactName,
+                ]);
                 continue;
             }
-            $seenEmails[$email] = true;
+            $seenEmails[$email] = $contactId;
 
             // Track latest contact timestamp for cursor-based pagination.
             // revisionInfo.updatedTimestamp is a Unix timestamp (integer).
@@ -374,6 +415,18 @@ function processContactPages(
                     output("  Ecomail response: " . json_encode($result['ecomail_response'], JSON_UNESCAPED_UNICODE));
                 }
 
+                // Save checkpoint after successful batch
+                if ($checkpoint !== null) {
+                    $checkpoint->save('contacts-sync', [
+                        'offset' => $report['contacts_fetched'],
+                        'batch_num' => $batchNum,
+                        'unique_emails' => count($seenEmails),
+                        'imported' => $report['imported'],
+                        'updated' => $report['updated'],
+                        'failed' => $report['failed'],
+                    ]);
+                }
+
                 $subscribers = []; // free memory
                 sleep(2); // rate limiting
             }
@@ -392,7 +445,7 @@ function processContactPages(
 
 // ── Run sync ──────────────────────────────────────────────────────────
 
-output("=== Anabix → Ecomail contact sync (v2026-03-24c) ===");
+output("=== Anabix → Ecomail contact sync (v2026-03-25a) ===");
 
 $report = [
     'status' => 'ok',
@@ -454,12 +507,23 @@ try {
 
     $subscribers = [];
     $batchNum = 0;
-    $seenEmails = [];  // deduplicate across all pages
+    $seenEmails = [];  // deduplicate across all pages — maps email => anabixId (for conflict logging)
+    $resumeFromOffset = null;
+
+    // Check for existing checkpoint (resume after crash)
+    $existingCheckpoint = $checkpoint->load('contacts-sync');
+    if ($existingCheckpoint !== null) {
+        $resumeFromOffset = $existingCheckpoint['offset'] ?? null;
+        $batchNum = $existingCheckpoint['batch_num'] ?? 0;
+        $report['imported'] = $existingCheckpoint['imported'] ?? 0;
+        $report['updated'] = $existingCheckpoint['updated'] ?? 0;
+        $report['failed'] = $existingCheckpoint['failed'] ?? 0;
+        $logger->info("Resuming from checkpoint", $existingCheckpoint);
+        output("Resuming from checkpoint: offset={$resumeFromOffset}, batch={$batchNum}");
+    }
 
     // Single-pass pagination: AnabixClient handles adaptive page sizing
     // (reduces page size on HTTP 500 to fetch remaining contacts).
-    // No cursor-based multi-pass needed — Anabix changedSince doesn't filter,
-    // it just returns the same dataset.
     $maxTimestamp = null;
     $hasContacts = false;
 
@@ -468,7 +532,7 @@ try {
         $report, $subscribers, $batchNum, $orgCache, $seenEmails,
         $anabix, $ecomail, $transformer, $logger,
         $fetchOrgs, $orgConcurrency, $batchSize,
-        $maxTimestamp
+        $maxTimestamp, $checkpoint, $resumeFromOffset
     );
 
     $logger->info("Fetch complete", [
@@ -488,7 +552,7 @@ try {
             $report, $subscribers, $batchNum, $orgCache, $seenEmails,
             $anabix, $ecomail, $transformer, $logger,
             $fetchOrgs, $orgConcurrency, $batchSize,
-            $maxTimestamp
+            $maxTimestamp, $checkpoint
         );
     }
 
@@ -565,9 +629,11 @@ try {
     if ($report['failed'] === 0 && $totalProcessed > 0) {
         $syncState->markCompleted();
         $syncState->save();
-        output("Sync state saved.");
+        $checkpoint->clear('contacts-sync');
+        output("Sync state saved, checkpoint cleared.");
     } else {
         output("WARNING: {$report['failed']} failures — sync state NOT updated (will retry next run).");
+        output("Checkpoint preserved — next run will resume from last successful batch.");
         $report['status'] = 'partial';
     }
 

@@ -209,7 +209,7 @@ class Transformer
         foreach (['phoneNumber', 'phone', 'mobile', 'telephone'] as $key) {
             $value = trim($contact[$key] ?? '');
             if ($value !== '') {
-                return $value;
+                return Normalizer::phoneToE164($value) ?? '';
             }
         }
 
@@ -358,38 +358,11 @@ class Transformer
 
     /**
      * Normalize a value to YYYY-MM-DD date string, or empty string if invalid.
-     * Rejects null-dates like 0000-00-00, dates before 1900, and garbage values.
+     * Delegates to shared Normalizer.
      */
     private static function normalizeDate(string $value): string
     {
-        $value = trim($value);
-        if ($value === '' || $value === '0000-00-00' || $value === '0000-00-00 00:00:00') {
-            return '';
-        }
-
-        $formats = ['Y-m-d', 'd.m.Y', 'd/m/Y', 'Y-m-d H:i:s', 'd.m.Y H:i:s'];
-        foreach ($formats as $format) {
-            $dt = \DateTimeImmutable::createFromFormat($format, $value);
-            if ($dt !== false) {
-                $result = $dt->format('Y-m-d');
-                // Reject dates before 1900 (Anabix null-date artifacts)
-                if ((int) $dt->format('Y') < 1900) {
-                    return '';
-                }
-                return $result;
-            }
-        }
-
-        // Try generic parsing as last resort
-        try {
-            $dt = new \DateTimeImmutable($value);
-            if ((int) $dt->format('Y') < 1900) {
-                return '';
-            }
-            return $dt->format('Y-m-d');
-        } catch (\Exception $e) {
-            return '';
-        }
+        return Normalizer::normalizeDate($value);
     }
 
     /**
