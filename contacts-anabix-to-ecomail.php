@@ -74,7 +74,6 @@ require_once __DIR__ . '/src/EcomailClient.php';
 require_once __DIR__ . '/src/Transformer.php';
 require_once __DIR__ . '/src/Normalizer.php';
 require_once __DIR__ . '/src/CheckpointManager.php';
-require_once __DIR__ . '/src/RetryExecutor.php';
 
 // ── Prevent concurrent runs ──────────────────────────────────────────
 $lockFile = __DIR__ . '/storage/state/sync.lock';

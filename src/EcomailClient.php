@@ -184,14 +184,6 @@ class EcomailClient
     }
 
     /**
-     * Get a single campaign detail.
-     */
-    public function getCampaign(int $campaignId): ?array
-    {
-        return $this->get("/campaigns/{$campaignId}");
-    }
-
-    /**
      * Get subscriber events for a campaign (sends, opens, clicks, bounces, etc.).
      *
      * @return array[]  List of event arrays
@@ -216,33 +208,6 @@ class EcomailClient
         }
 
         return $response['subscriber'] ?? $response['data'] ?? $response;
-    }
-
-    /**
-     * Get email log for a subscriber.
-     *
-     * API: GET /lists/{list_id}/subscriber/{email}/email-log
-     * @see https://docs.ecomail.cz/api-reference/subscribers/email-log
-     *
-     * Returns array of log entries with fields:
-     *   campaign_id, autoresponder_id, action_id, event, msg, url,
-     *   email, occured_at, mail_name
-     *
-     * Events: send, open, click, hard_bounce, soft_bounce,
-     *         out_of_band, unsub, spam, spam_complaint
-     *
-     * @return array[]  List of email log entries
-     */
-    public function getSubscriberEmailLog(string $email): array
-    {
-        $encoded = urlencode($email);
-        $response = $this->get("/lists/{$this->listId}/subscriber/{$encoded}/email-log");
-
-        if ($response === null) {
-            return [];
-        }
-
-        return $response['data'] ?? $response['events'] ?? $response ?? [];
     }
 
     // ── HTTP methods ──────────────────────────────────────────────────
