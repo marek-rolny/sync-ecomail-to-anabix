@@ -78,18 +78,52 @@ class AnabixClient
             $response = $this->request('contacts', 'getAll', $data, $retries);
 
             if ($response === null) {
-                if ($totalFetched > 0) {
-                    // We already have data — treat this as probable end of data.
-                    // Anabix API is known to return HTTP 500 when offset exceeds total contacts.
+                if ($totalFetched > 0 && $fullInfo && $limit > 5) {
+                    // Anabix API may return HTTP 500 for large fullInfo responses
+                    // at high offsets. Retry with progressively smaller page sizes.
+                    $smallerLimits = array_filter([25, 10, 5], fn($l) => $l < $limit);
+                    $recovered = false;
+                    foreach ($smallerLimits as $smallerLimit) {
+                        $this->logger->info("Retrying offset {$offset} with smaller page size", [
+                            'original_limit' => $limit,
+                            'new_limit' => $smallerLimit,
+                        ]);
+                        $retryData = $data;
+                        $retryData['limit'] = $smallerLimit;
+                        $retryResponse = $this->request('contacts', 'getAll', $retryData, 1);
+                        if ($retryResponse !== null) {
+                            $retryContacts = $this->extractList($retryResponse);
+                            if (!empty($retryContacts)) {
+                                // Success! Switch to smaller limit for remaining pages
+                                $limit = $smallerLimit;
+                                $response = $retryResponse;
+                                $recovered = true;
+                                $this->logger->info("Recovered with smaller page size", [
+                                    'limit' => $smallerLimit,
+                                    'contacts' => count($retryContacts),
+                                ]);
+                                break;
+                            }
+                        }
+                    }
+                    if (!$recovered) {
+                        $this->logger->warning("Failed to fetch contacts at offset {$offset} even with smaller pages — treating as end of data", [
+                            'offset' => $offset,
+                            'total_fetched' => $totalFetched,
+                        ]);
+                        break;
+                    }
+                } elseif ($totalFetched > 0) {
                     $this->logger->warning("Failed to fetch contacts at offset {$offset}, but already have {$totalFetched} contacts — treating as end of data", [
                         'offset' => $offset,
                         'limit' => $limit,
                         'total_fetched' => $totalFetched,
                     ]);
+                    break;
                 } else {
                     $this->logger->error("Failed to fetch contacts on first page", ['offset' => $offset, 'limit' => $limit]);
+                    break;
                 }
-                break;
             }
 
             $contacts = $this->extractList($response);

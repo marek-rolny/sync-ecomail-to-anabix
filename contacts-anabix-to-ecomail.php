@@ -456,93 +456,40 @@ try {
     $batchNum = 0;
     $seenEmails = [];  // deduplicate across all pages
 
-    // Cursor-based pagination: Anabix API has an offset limit (~1500 contacts).
-    // After each pass, we use the latest changedDate as a cursor to continue
-    // fetching from where we left off. Deduplication by email prevents duplicates.
-    $cursorSince = $changedSince;
-    $pass = 0;
-    $maxPasses = 50; // safety: 50 * 1500 = 75 000 contacts max
+    // Single-pass pagination: AnabixClient handles adaptive page sizing
+    // (reduces page size on HTTP 500 to fetch remaining contacts).
+    // No cursor-based multi-pass needed — Anabix changedSince doesn't filter,
+    // it just returns the same dataset.
+    $maxTimestamp = null;
     $hasContacts = false;
 
-    do {
-        $pass++;
-        $maxTimestamp = null;
-        $prevFetched = $report['contacts_fetched'];
+    $hasContacts = processContactPages(
+        $anabix->getContactsPaginated($changedSince, true),
+        $report, $subscribers, $batchNum, $orgCache, $seenEmails,
+        $anabix, $ecomail, $transformer, $logger,
+        $fetchOrgs, $orgConcurrency, $batchSize,
+        $maxTimestamp
+    );
 
-        output("Fetch pass {$pass} (changedSince={$cursorSince})...");
-
-        $passHasContacts = processContactPages(
-            $anabix->getContactsPaginated($cursorSince, true),
-            $report, $subscribers, $batchNum, $orgCache, $seenEmails,
-            $anabix, $ecomail, $transformer, $logger,
-            $fetchOrgs, $orgConcurrency, $batchSize,
-            $maxTimestamp
-        );
-
-        if ($passHasContacts) {
-            $hasContacts = true;
-        }
-
-        $fetchedThisPass = $report['contacts_fetched'] - $prevFetched;
-
-        $logger->info("Fetch pass {$pass} complete", [
-            'fetched_this_pass' => $fetchedThisPass,
-            'total_fetched' => $report['contacts_fetched'],
-            'unique_emails' => count($seenEmails),
-            'max_timestamp' => $maxTimestamp,
-        ]);
-
-        // Continue if: we got contacts AND have a timestamp cursor to advance
-        // AND fetched a meaningful number (suggests we hit the API response size limit)
-        if ($maxTimestamp !== null && $fetchedThisPass >= 50) {
-            // maxTimestamp is a Unix timestamp (int) — convert to datetime + 1 second
-            $cursorSince = date('Y-m-d H:i:s', $maxTimestamp + 1);
-            output("Cursor advanced to {$cursorSince} (fetched {$fetchedThisPass} this pass, {$report['contacts_fetched']} total)");
-        } else {
-            break; // No more contacts or too few to suggest a limit
-        }
-    } while ($pass < $maxPasses);
-
-    if ($pass > 1) {
-        output("Completed {$pass} fetch passes, total {$report['contacts_fetched']} contacts fetched");
-    }
+    $logger->info("Fetch complete", [
+        'total_fetched' => $report['contacts_fetched'],
+        'unique_emails' => count($seenEmails),
+    ]);
 
     // Fallback: delta returned 0 → try full export with old date
-    if (!$hasContacts) {
+    if (!$hasContacts && $report['sync_mode'] === 'delta') {
         $fallbackSince = '2000-01-01T00:00:00+00:00';
         output("Delta returned 0 contacts, falling back to full export (changedSince={$fallbackSince})...");
         $logger->info("Delta empty, falling back to full export");
         $report['sync_mode'] = 'full_fallback';
 
-        $cursorSince = $fallbackSince;
-        $pass = 0;
-
-        do {
-            $pass++;
-            $maxTimestamp = null;
-            $prevFetched = $report['contacts_fetched'];
-
-            $passHasContacts = processContactPages(
-                $anabix->getContactsPaginated($cursorSince, true),
-                $report, $subscribers, $batchNum, $orgCache, $seenEmails,
-                $anabix, $ecomail, $transformer, $logger,
-                $fetchOrgs, $orgConcurrency, $batchSize,
-                $maxTimestamp
-            );
-
-            if ($passHasContacts) {
-                $hasContacts = true;
-            }
-
-            $fetchedThisPass = $report['contacts_fetched'] - $prevFetched;
-
-            if ($maxTimestamp !== null && $fetchedThisPass >= 50) {
-                $cursorSince = date('Y-m-d H:i:s', $maxTimestamp + 1);
-                output("Fallback cursor advanced to {$cursorSince} (fetched {$fetchedThisPass} this pass)");
-            } else {
-                break;
-            }
-        } while ($pass < $maxPasses);
+        $hasContacts = processContactPages(
+            $anabix->getContactsPaginated($fallbackSince, true),
+            $report, $subscribers, $batchNum, $orgCache, $seenEmails,
+            $anabix, $ecomail, $transformer, $logger,
+            $fetchOrgs, $orgConcurrency, $batchSize,
+            $maxTimestamp
+        );
     }
 
     // Send remaining subscribers
