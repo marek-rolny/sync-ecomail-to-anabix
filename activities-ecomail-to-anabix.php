@@ -235,7 +235,6 @@ try {
             }
 
             // Build activity body
-            $eventLabel = formatEventLabel($eventType);
             $body = "Stav: {$eventType}\n"
                 . "Předmět: {$subject}\n"
                 . "Od: {$fromName} | {$fromEmail}";
@@ -316,22 +315,3 @@ echo json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . PHP_EOL;
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-/**
- * Format event type label for activity body.
- */
-function formatEventLabel(string $eventType): string
-{
-    $labels = [
-        'send'           => 'Odesláno',
-        'open'           => 'Otevřeno',
-        'click'          => 'Kliknuto',
-        'hard_bounce'    => 'Hard bounce',
-        'soft_bounce'    => 'Soft bounce',
-        'out_of_band'    => 'Out of band',
-        'unsub'          => 'Odhlášen',
-        'spam'           => 'Spam',
-        'spam_complaint' => 'Spam complaint',
-    ];
-
-    return $labels[$eventType] ?? $eventType;
-}

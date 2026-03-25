@@ -202,21 +202,6 @@ class AnabixClient
     }
 
     /**
-     * Fetch a single contact by ID (full detail).
-     */
-    public function getContact(int $contactId): ?array
-    {
-        $response = $this->request('contacts', 'get', ['idContact' => $contactId]);
-
-        if ($response === null) {
-            return null;
-        }
-
-        // Response may contain the contact directly or nested under 'data'
-        return $response['data'] ?? $response;
-    }
-
-    /**
      * Search for a contact by email.
      *
      * Used by sync-sheets.php for Google Sheets → Anabix activity sync.
@@ -247,20 +232,6 @@ class AnabixClient
     }
 
     // ── Organizations ─────────────────────────────────────────────────
-
-    /**
-     * Fetch a single organization by ID.
-     */
-    public function getOrganization(int $orgId): ?array
-    {
-        $response = $this->request('organizations', 'get', ['idOrganization' => $orgId]);
-
-        if ($response === null) {
-            return null;
-        }
-
-        return $response['data'] ?? $response;
-    }
 
     /**
      * Fetch multiple organizations in parallel using curl_multi.
