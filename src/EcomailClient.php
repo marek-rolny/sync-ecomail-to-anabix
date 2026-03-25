@@ -43,10 +43,24 @@ class EcomailClient
      * Uses POST /lists/{listId}/subscribe-bulk.
      * Sends update_existing=true so existing contacts get updated.
      *
+     * On failure, retries once. If retry also fails, splits the batch in half
+     * and tries each half separately (recursive). This isolates problematic
+     * contacts without losing the entire batch.
+     *
      * @param array[] $subscribers  Array of subscriber payloads (from Transformer)
      * @return array  ['imported' => int, 'updated' => int, 'failed' => int, 'errors' => string[]]
      */
     public function bulkUpsertContacts(array $subscribers): array
+    {
+        return $this->sendBatch($subscribers, 0);
+    }
+
+    /**
+     * Internal: send a batch with retry and recursive split on failure.
+     *
+     * @param int $depth  Recursion depth (prevents infinite splitting)
+     */
+    private function sendBatch(array $subscribers, int $depth): array
     {
         $result = [
             'imported' => 0,
@@ -73,30 +87,59 @@ class EcomailClient
             $payload['resubscribe'] = true;
         }
 
+        // Attempt 1
         $response = $this->post("/lists/{$this->listId}/subscribe-bulk", $payload);
 
+        // Attempt 2 (retry) if first attempt failed
         if ($response === null) {
-            $result['failed'] = count($subscribers);
-            $result['errors'][] = 'API request failed';
-            return $result;
+            $this->logger->warning("Ecomail batch failed, retrying in 5s", ['count' => count($subscribers)]);
+            sleep(5);
+            $response = $this->post("/lists/{$this->listId}/subscribe-bulk", $payload);
         }
 
-        // Log raw response so we can see what Ecomail actually returns
+        // Both attempts failed — split and retry halves
+        if ($response === null) {
+            // Don't split single-item batches or if we've split too deep
+            if (count($subscribers) <= 1 || $depth >= 4) {
+                $result['failed'] = count($subscribers);
+                $emails = array_map(fn($s) => $s['email'] ?? '?', $subscribers);
+                $result['errors'][] = 'Batch failed after retry: ' . implode(', ', $emails);
+                $this->logger->error("Ecomail batch permanently failed", [
+                    'count' => count($subscribers),
+                    'emails' => $emails,
+                    'depth' => $depth,
+                ]);
+                return $result;
+            }
+
+            $mid = (int) ceil(count($subscribers) / 2);
+            $firstHalf = array_slice($subscribers, 0, $mid);
+            $secondHalf = array_slice($subscribers, $mid);
+
+            $this->logger->warning("Ecomail batch failed, splitting", [
+                'original_count' => count($subscribers),
+                'first_half' => count($firstHalf),
+                'second_half' => count($secondHalf),
+                'depth' => $depth,
+            ]);
+
+            $r1 = $this->sendBatch($firstHalf, $depth + 1);
+            sleep(2);
+            $r2 = $this->sendBatch($secondHalf, $depth + 1);
+
+            return $this->mergeResults($r1, $r2);
+        }
+
+        // Success — log and parse response
         $this->logger->info("Ecomail subscribe-bulk raw response", [
             'sent' => count($subscribers),
             'response' => $response,
         ]);
 
-        // Parse response — Ecomail returns 'inserts' (not 'inserted')
         $result['imported'] = (int) ($response['inserts'] ?? $response['inserted'] ?? $response['imported'] ?? 0);
         $result['updated'] = (int) ($response['updated'] ?? $response['updates'] ?? 0);
-        // Store raw response keys and values for debugging
         $result['ecomail_response'] = $response;
 
-        // Ecomail subscribe-bulk only returns {"inserts": N} — it does NOT
-        // report updates separately.  If update_existing is true, existing
-        // contacts are silently updated.  So "skipped" here really means
-        // "already existed and was updated without a separate counter".
         $unaccounted = count($subscribers) - $result['imported'] - $result['updated'];
         if ($unaccounted > 0) {
             $this->logger->info("Ecomail subscribe-bulk result", [
@@ -108,6 +151,17 @@ class EcomailClient
         }
 
         return $result;
+    }
+
+    private function mergeResults(array $r1, array $r2): array
+    {
+        return [
+            'imported' => $r1['imported'] + $r2['imported'],
+            'updated' => $r1['updated'] + $r2['updated'],
+            'failed' => $r1['failed'] + $r2['failed'],
+            'errors' => array_merge($r1['errors'], $r2['errors']),
+            'ecomail_response' => $r1['ecomail_response'] ?? $r2['ecomail_response'] ?? null,
+        ];
     }
 
     // ── Campaigns (for activity sync) ─────────────────────────────────
