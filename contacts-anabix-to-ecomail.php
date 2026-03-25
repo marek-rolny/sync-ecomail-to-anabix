@@ -621,6 +621,81 @@ try {
 
     output("Import done: imported={$report['imported']} updated={$report['updated']} failed={$report['failed']}");
 
+    // ── Step 5: GDPR cleanup — delete contacts not in Anabix (full sync only) ──
+
+    $isFullSync = in_array($report['sync_mode'], ['full', 'full_fallback'], true);
+    $gdprSafetyThreshold = 0.10; // max 10% deletion — safety brake
+
+    if ($isFullSync && $report['failed'] === 0 && count($seenEmails) > 0) {
+        output("");
+        output("=== GDPR cleanup (full sync) ===");
+
+        $ecomailEmails = $ecomail->getAllSubscriberEmails();
+        output("Ecomail subscribers: " . count($ecomailEmails));
+
+        if (empty($ecomailEmails)) {
+            output("WARNING: Could not fetch Ecomail subscribers — skipping cleanup.");
+            $logger->warning("GDPR cleanup skipped: failed to fetch Ecomail subscribers");
+        } else {
+            // Find emails in Ecomail that are NOT in Anabix
+            $toDelete = array_diff($ecomailEmails, array_keys($seenEmails));
+            $deleteCount = count($toDelete);
+            $deleteRatio = $deleteCount / count($ecomailEmails);
+
+            $report['gdpr_ecomail_total'] = count($ecomailEmails);
+            $report['gdpr_to_delete'] = $deleteCount;
+
+            $logger->info("GDPR cleanup candidates", [
+                'ecomail_total' => count($ecomailEmails),
+                'anabix_total' => count($seenEmails),
+                'to_delete' => $deleteCount,
+                'delete_ratio' => round($deleteRatio * 100, 1) . '%',
+                'threshold' => round($gdprSafetyThreshold * 100) . '%',
+            ]);
+
+            if ($deleteCount === 0) {
+                output("No contacts to delete — Ecomail is in sync with Anabix.");
+            } elseif ($deleteRatio > $gdprSafetyThreshold) {
+                output("WARNING: {$deleteCount} contacts to delete (" . round($deleteRatio * 100, 1) . "%) exceeds safety threshold (" . round($gdprSafetyThreshold * 100) . "%).");
+                output("Cleanup SKIPPED — check logs and run again if this is expected.");
+                $logger->warning("GDPR cleanup aborted: ratio exceeds threshold", [
+                    'to_delete' => $deleteCount,
+                    'ratio' => round($deleteRatio * 100, 1) . '%',
+                    'emails_sample' => array_slice(array_values($toDelete), 0, 20),
+                ]);
+                $report['gdpr_status'] = 'skipped_threshold';
+            } else {
+                output("Deleting {$deleteCount} contacts not found in Anabix...");
+
+                // Log full list before deletion
+                $logger->info("GDPR deleting contacts", [
+                    'count' => $deleteCount,
+                    'emails' => array_values($toDelete),
+                ]);
+
+                $deleted = 0;
+                $deleteFailed = 0;
+                foreach ($toDelete as $email) {
+                    if ($ecomail->deleteSubscriber($email)) {
+                        $deleted++;
+                        $logger->debug("GDPR deleted", ['email' => $email]);
+                    } else {
+                        $deleteFailed++;
+                        $logger->error("GDPR delete failed", ['email' => $email]);
+                    }
+                    usleep(200000); // 200ms between deletes — rate limit courtesy
+                }
+
+                output("GDPR cleanup done: deleted={$deleted}, failed={$deleteFailed}");
+                $report['gdpr_deleted'] = $deleted;
+                $report['gdpr_delete_failed'] = $deleteFailed;
+                $report['gdpr_status'] = 'completed';
+            }
+        }
+    } elseif (!$isFullSync) {
+        $logger->debug("GDPR cleanup skipped: not a full sync", ['mode' => $report['sync_mode']]);
+    }
+
     // ── Step 7: Save state ────────────────────────────────────────────
 
     // Only save state if Ecomail confirmed imports/updates and no failures
@@ -665,6 +740,13 @@ output("Email fallback: " . ($report['email_fallback'] ?? 0));
 output("Imported:       {$report['imported']}");
 output("Updated:        {$report['updated']}");
 output("Failed:         {$report['failed']}");
+if (isset($report['gdpr_status'])) {
+    output("GDPR cleanup:   {$report['gdpr_status']}");
+    output("  Ecomail total:" . ($report['gdpr_ecomail_total'] ?? 0));
+    output("  To delete:    " . ($report['gdpr_to_delete'] ?? 0));
+    output("  Deleted:      " . ($report['gdpr_deleted'] ?? 0));
+    output("  Delete failed:" . ($report['gdpr_delete_failed'] ?? 0));
+}
 output("Status:         {$report['status']}");
 
 if (!empty($report['errors'])) {
@@ -697,6 +779,8 @@ $statusData = [
     'imported' => $report['imported'],
     'updated' => $report['updated'],
     'failed' => $report['failed'],
+    'gdpr_status' => $report['gdpr_status'] ?? null,
+    'gdpr_deleted' => $report['gdpr_deleted'] ?? 0,
     'status' => $report['status'],
 ];
 

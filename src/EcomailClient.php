@@ -164,6 +164,79 @@ class EcomailClient
         ];
     }
 
+    // ── Subscriber list & cleanup (GDPR) ───────────────────────────────
+
+    /**
+     * Fetch all subscriber emails from the configured Ecomail list.
+     *
+     * Uses GET /lists/{listId}/subscribers (paginated).
+     *
+     * @return string[]  Array of lowercase email addresses
+     */
+    public function getAllSubscriberEmails(): array
+    {
+        $emails = [];
+        $page = 1;
+
+        while (true) {
+            $response = $this->get("/lists/{$this->listId}/subscribers", ['page' => $page]);
+
+            if ($response === null) {
+                $this->logger->error("Failed to fetch subscribers page", ['page' => $page]);
+                return $emails;
+            }
+
+            $subscribers = $response['subscriber'] ?? $response['data'] ?? $response ?? [];
+
+            if (empty($subscribers) || !is_array($subscribers)) {
+                break;
+            }
+
+            foreach ($subscribers as $sub) {
+                $email = strtolower(trim($sub['email'] ?? ''));
+                if ($email !== '') {
+                    $emails[] = $email;
+                }
+            }
+
+            $this->logger->debug("Fetched Ecomail subscribers page", [
+                'page' => $page,
+                'count' => count($subscribers),
+                'total_so_far' => count($emails),
+            ]);
+
+            // No more pages
+            if (count($subscribers) < 100) {
+                break;
+            }
+
+            $page++;
+            usleep(300000); // 300ms rate limit courtesy
+        }
+
+        return $emails;
+    }
+
+    /**
+     * Permanently delete a subscriber from Ecomail (all lists).
+     *
+     * Uses DELETE /subscribers/{email}/delete
+     *
+     * @return bool  True if deleted successfully
+     */
+    public function deleteSubscriber(string $email): bool
+    {
+        $encoded = urlencode($email);
+        $response = $this->httpRequest('DELETE', "/subscribers/{$encoded}/delete");
+
+        if ($response === null) {
+            $this->logger->error("Failed to delete subscriber", ['email' => $email]);
+            return false;
+        }
+
+        return true;
+    }
+
     // ── Campaigns (for activity sync) ─────────────────────────────────
 
     /**
@@ -241,6 +314,9 @@ class EcomailClient
             $options[CURLOPT_URL] = $url;
             $options[CURLOPT_POST] = true;
             $options[CURLOPT_POSTFIELDS] = json_encode($data, JSON_UNESCAPED_UNICODE);
+        } elseif ($method === 'DELETE') {
+            $options[CURLOPT_URL] = $url;
+            $options[CURLOPT_CUSTOMREQUEST] = 'DELETE';
         } else {
             if (!empty($data)) {
                 $url .= '?' . http_build_query($data);
