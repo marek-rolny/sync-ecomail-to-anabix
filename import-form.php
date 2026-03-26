@@ -328,12 +328,13 @@ try {
     $idxCity = findColumnIndex($headers, $colCity);
     $idxTimestamp = findColumnIndex($headers, $colTimestamp);
 
-    // Email column is required
-    if ($idxEmail === null) {
-        if ($colEmail !== null) {
-            throw new RuntimeException("Column '{$colEmail}' ({$prefix}COL_EMAIL) not found in sheet headers.");
-        }
-        throw new RuntimeException("{$prefix}COL_EMAIL is not configured. Set it to the email column header name.");
+    // Email column is optional — without it, contacts are always created (no dedup)
+    if ($idxEmail === null && $colEmail !== '') {
+        throw new RuntimeException("Column '{$colEmail}' ({$prefix}COL_EMAIL) not found in sheet headers.");
+    }
+    // Name column is required if no email column
+    if ($idxEmail === null && $idxName === null) {
+        throw new RuntimeException("Either {$prefix}COL_EMAIL or {$prefix}COL_NAME must be configured.");
     }
 
     // Track which column indices are "contact" columns (not included in note)
@@ -370,13 +371,14 @@ try {
         $rowNum = $rowIndex + 2; // +2: header + 0-based
         $values = array_values($row);
 
-        $email = strtolower(trim($values[$idxEmail] ?? ''));
+        $email = $idxEmail !== null ? strtolower(trim($values[$idxEmail] ?? '')) : '';
         $fullName = $idxName !== null ? trim($values[$idxName] ?? '') : '';
         $phone = $idxPhone !== null ? trim($values[$idxPhone] ?? '') : '';
         $cityRaw = $idxCity !== null ? trim($values[$idxCity] ?? '') : '';
         $timestamp = $idxTimestamp !== null ? trim($values[$idxTimestamp] ?? '') : '';
 
         // ── Incremental: skip rows older than checkpoint ────────────
+        $rowDt = null;
         if ($lastTimestamp !== null && $timestamp !== '' && $idxTimestamp !== null) {
             $rowDt = parseTimestamp($timestamp);
             $lastDt = parseTimestamp($lastTimestamp);
@@ -395,8 +397,15 @@ try {
             }
         }
 
-        if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
-            output("  Row {$rowNum}: SKIP (no valid email)");
+        // Validate email if present
+        $hasEmail = $email !== '' && filter_var($email, FILTER_VALIDATE_EMAIL);
+        if (!$hasEmail) {
+            $email = ''; // clear invalid email
+        }
+
+        // Need at least a name or email to create a contact
+        if ($email === '' && $fullName === '') {
+            output("  Row {$rowNum}: SKIP (no email and no name)");
             $report['skipped_no_email']++;
             continue;
         }
@@ -406,7 +415,8 @@ try {
         $phoneE164 = $phone !== '' ? DataNormalizer::phoneToE164($phone) : null;
         $city = cleanCity($cityRaw);
 
-        output("  Row {$rowNum}: {$fullName} <{$email}>");
+        $label = $hasEmail ? "{$fullName} <{$email}>" : "{$fullName} (no email)";
+        output("  Row {$rowNum}: {$label}");
         if ($phone !== '') {
             output("    Phone: {$phone} → " . ($phoneReadable ?? 'invalid'));
         }
@@ -418,8 +428,12 @@ try {
         $contactId = null;
 
         if ($execute) {
-            $existing = $anabix->findContactByEmail($email);
-            usleep(300000);
+            // Try to find existing contact by email (only if email is available)
+            $existing = null;
+            if ($hasEmail) {
+                $existing = $anabix->findContactByEmail($email);
+                usleep(300000);
+            }
 
             if ($existing !== null) {
                 $contactId = $existing['idContact'] ?? $existing['id'] ?? null;
@@ -435,11 +449,13 @@ try {
                 $contactData = [
                     'firstName' => $firstName,
                     'lastName' => $lastName,
-                    'email' => $email,
                     'idOwner' => $activityIdUser,
                     'source' => $activityTitle,
                     'gdprReason' => 5,
                 ];
+                if ($hasEmail) {
+                    $contactData['email'] = $email;
+                }
                 if ($gdprDate !== '') {
                     $contactData['gdprAcceptanceDate'] = $gdprDate;
                 }
