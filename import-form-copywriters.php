@@ -77,6 +77,12 @@ $sheets = new GoogleSheetsClient($sheetId, $sheetGid, $logger);
 
 $activityIdUser = (int) env('ANABIX_ACTIVITY_ID_USER', '6');
 
+// Lists to assign every imported contact to
+$assignLists = [
+    49510, // HR: Copywriter
+    49519, // HRstav: Zájem o spolupráci
+];
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 function output(string $msg): void
@@ -282,6 +288,20 @@ try {
             }
         } else {
             output("    [DRY-RUN] Would find/create contact");
+        }
+
+        // ── Assign contact to lists ─────────────────────────────────
+        if ($execute && $contactId !== null) {
+            foreach ($assignLists as $listId) {
+                if ($anabix->addContactToList((int) $contactId, $listId)) {
+                    output("    Added to list #{$listId}");
+                } else {
+                    output("    WARNING: Failed to add to list #{$listId}");
+                }
+                usleep(200000);
+            }
+        } elseif (!$execute) {
+            output("    [DRY-RUN] Would assign to lists: " . implode(', ', $assignLists));
         }
 
         // ── Build activity note from form responses ─────────────────
