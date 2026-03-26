@@ -25,11 +25,11 @@ if (php_sapi_name() !== 'cli') {
     ob_implicit_flush(true);
 }
 
-require_once __DIR__ . '/src/env.php';
+require_once __DIR__ . '/../src/env.php';
 
 // ── Load .env ──────────────────────────────────────────────────────────
 
-$envFile = __DIR__ . '/.env';
+$envFile = __DIR__ . '/../.env';
 if (!file_exists($envFile)) {
     echo "FAIL: .env file not found\n";
     exit(1);
