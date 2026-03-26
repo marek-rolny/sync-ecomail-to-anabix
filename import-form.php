@@ -91,7 +91,7 @@ $prefix = 'FORM_' . strtoupper($formName) . '_';
 /**
  * Read a FORM_{NAME}_* setting from env, with optional default.
  */
-function formEnv(string $key, ?string $default = null): ?string
+function formEnv(string $key, string $default = ''): string
 {
     global $prefix;
     return env($prefix . $key, $default);
