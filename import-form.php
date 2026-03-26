@@ -263,6 +263,14 @@ try {
     // Get headers from first row keys
     $headers = array_keys($rows[0]);
 
+    // Show all headers for debugging column mapping
+    output("Sheet headers:");
+    foreach ($headers as $idx => $h) {
+        $short = mb_strlen($h) > 60 ? mb_substr($h, 0, 60) . '…' : $h;
+        output("  [{$idx}] \"{$short}\"");
+    }
+    output("");
+
     // Resolve column indices from config (by header name)
     $idxEmail = findColumnIndex($headers, $colEmail);
     $idxName = findColumnIndex($headers, $colName);
