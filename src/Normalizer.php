@@ -6,7 +6,7 @@
  * Stateless — all methods are static, no constructor needed.
  * Designed for reuse across Anabix→Ecomail, Ecomail→Anabix, Sheets→Anabix, etc.
  */
-class Normalizer
+class DataNormalizer
 {
     /**
      * Normalize phone number to E.164 format (no spaces): +420777123456

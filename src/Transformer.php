@@ -209,7 +209,7 @@ class Transformer
         foreach (['phoneNumber', 'phone', 'mobile', 'telephone'] as $key) {
             $value = trim($contact[$key] ?? '');
             if ($value !== '') {
-                return Normalizer::phoneToE164($value) ?? '';
+                return DataNormalizer::phoneToE164($value) ?? '';
             }
         }
 
@@ -358,11 +358,11 @@ class Transformer
 
     /**
      * Normalize a value to YYYY-MM-DD date string, or empty string if invalid.
-     * Delegates to shared Normalizer.
+     * Delegates to shared DataNormalizer.
      */
     private static function normalizeDate(string $value): string
     {
-        return Normalizer::normalizeDate($value);
+        return DataNormalizer::normalizeDate($value);
     }
 
     /**
