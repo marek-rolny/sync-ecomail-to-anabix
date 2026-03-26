@@ -250,23 +250,26 @@ class AnabixClient
     }
 
     /**
-     * Add a contact to a list (group) in Anabix.
+     * Add a contact to one or more lists in Anabix.
      *
-     * @param int $contactId  Contact ID
-     * @param int $listId     List ID
+     * Uses contacts.manageLists API:
+     *   idContact, addTo: [listId1, listId2, ...]
+     *
+     * @param int   $contactId  Contact ID
+     * @param int[] $listIds    List IDs to add the contact to
      * @return bool  True if successful
      */
-    public function addContactToList(int $contactId, int $listId): bool
+    public function addContactToLists(int $contactId, array $listIds): bool
     {
-        $response = $this->request('lists', 'addContact', [
+        $response = $this->request('contacts', 'manageLists', [
             'idContact' => $contactId,
-            'idList' => $listId,
+            'addTo' => array_values($listIds),
         ]);
 
         if ($response === null) {
-            $this->logger->error("Failed to add contact to list", [
+            $this->logger->error("Failed to add contact to lists", [
                 'contact' => $contactId,
-                'list' => $listId,
+                'lists' => $listIds,
             ]);
             return false;
         }

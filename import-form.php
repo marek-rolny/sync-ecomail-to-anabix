@@ -53,22 +53,27 @@ require_once __DIR__ . '/src/Normalizer.php';
 
 $formName = null;
 $execute = false;
+$fullRun = false;
 
 if (php_sapi_name() === 'cli') {
     $formName = $argv[1] ?? null;
     $execute = in_array('--execute', $argv ?? [], true);
+    $fullRun = in_array('--full', $argv ?? [], true);
 
-    if ($formName === '--execute') {
+    if ($formName === '--execute' || $formName === '--full') {
         $formName = $argv[2] ?? null;
     }
-    if ($formName === null || $formName === '--execute') {
-        echo "Usage: php import-form.php <form-name> [--execute]\n";
+    if ($formName === null || $formName === '--execute' || $formName === '--full') {
+        echo "Usage: php import-form.php <form-name> [--execute] [--full]\n";
+        echo "  --execute  Write to Anabix (default: dry-run)\n";
+        echo "  --full     Process all rows (ignore checkpoint)\n";
         echo "Example: php import-form.php copywriters --execute\n";
         exit(1);
     }
 } else {
     $formName = $_GET['form'] ?? null;
     $execute = ($_GET['execute'] ?? '') === '1';
+    $fullRun = ($_GET['full'] ?? '') === '1';
 
     if ($formName === null || $formName === '') {
         echo "Error: ?form=<name> parameter required.\n";
@@ -139,6 +144,41 @@ $anabix = new AnabixClient($anabixUser, $anabixToken, $anabixUrl, $logger);
 $sheets = new GoogleSheetsClient($sheetId, $sheetGid, $logger);
 
 $activityIdUser = (int) env('ANABIX_ACTIVITY_ID_USER', '6');
+
+// ── Checkpoint (incremental import) ─────────────────────────────────
+
+$stateDir = __DIR__ . '/storage/state';
+$stateFile = $stateDir . '/form-' . strtolower($formName) . '.json';
+
+$lastTimestamp = null; // null = process all (first run or --full)
+
+if (!$fullRun && file_exists($stateFile)) {
+    $state = json_decode(file_get_contents($stateFile), true);
+    $lastTimestamp = $state['last_timestamp'] ?? null;
+}
+
+/**
+ * Parse a Czech timestamp ("17.2.2026 12:52:06") into a comparable DateTime.
+ * Returns null if parsing fails.
+ */
+function parseTimestamp(string $ts): ?DateTimeImmutable
+{
+    $ts = trim($ts);
+    if ($ts === '') {
+        return null;
+    }
+    // Google Forms Czech format: d.m.Y H:i:s
+    $dt = DateTimeImmutable::createFromFormat('d.m.Y H:i:s', $ts);
+    if ($dt !== false) {
+        return $dt;
+    }
+    // Fallback: try generic parsing
+    try {
+        return new DateTimeImmutable($ts);
+    } catch (Exception $e) {
+        return null;
+    }
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -229,6 +269,13 @@ function findColumnIndex(array $headers, ?string $configValue): ?int
 
 output("=== Import: Google Form ({$formName}) → Anabix ===");
 output("Mode: " . ($execute ? "EXECUTE (writing to Anabix)" : "DRY-RUN (no changes)"));
+if ($fullRun) {
+    output("Run: FULL (processing all rows, ignoring checkpoint)");
+} elseif ($lastTimestamp !== null) {
+    output("Run: INCREMENTAL (rows newer than \"{$lastTimestamp}\")");
+} else {
+    output("Run: FIRST RUN (no checkpoint, processing all rows)");
+}
 output("Activity title: {$activityTitle}");
 if (!empty($assignLists)) {
     output("Assign to lists: " . implode(', ', $assignLists));
@@ -244,9 +291,12 @@ $report = [
     'contacts_found' => 0,
     'activities_created' => 0,
     'skipped_no_email' => 0,
+    'skipped_old' => 0,
     'failed' => 0,
     'errors' => [],
 ];
+
+$newestTimestamp = null; // track the newest timestamp seen during this run
 
 try {
     output("Fetching Google Sheet...");
@@ -326,6 +376,25 @@ try {
         $cityRaw = $idxCity !== null ? trim($values[$idxCity] ?? '') : '';
         $timestamp = $idxTimestamp !== null ? trim($values[$idxTimestamp] ?? '') : '';
 
+        // ── Incremental: skip rows older than checkpoint ────────────
+        if ($lastTimestamp !== null && $timestamp !== '' && $idxTimestamp !== null) {
+            $rowDt = parseTimestamp($timestamp);
+            $lastDt = parseTimestamp($lastTimestamp);
+            if ($rowDt !== null && $lastDt !== null && $rowDt <= $lastDt) {
+                $report['skipped_old']++;
+                continue;
+            }
+        }
+
+        // Track newest timestamp for checkpoint save
+        if ($timestamp !== '') {
+            $rowDt = $rowDt ?? parseTimestamp($timestamp);
+            $newestDt = $newestTimestamp !== null ? parseTimestamp($newestTimestamp) : null;
+            if ($rowDt !== null && ($newestDt === null || $rowDt > $newestDt)) {
+                $newestTimestamp = $timestamp;
+            }
+        }
+
         if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
             output("  Row {$rowNum}: SKIP (no valid email)");
             $report['skipped_no_email']++;
@@ -401,14 +470,12 @@ try {
 
         // ── Assign contact to lists ─────────────────────────────────
         if ($execute && $contactId !== null && !empty($assignLists)) {
-            foreach ($assignLists as $listId) {
-                if ($anabix->addContactToList((int) $contactId, $listId)) {
-                    output("    Added to list #{$listId}");
-                } else {
-                    output("    WARNING: Failed to add to list #{$listId}");
-                }
-                usleep(200000);
+            if ($anabix->addContactToLists((int) $contactId, $assignLists)) {
+                output("    Added to lists: " . implode(', ', $assignLists));
+            } else {
+                output("    WARNING: Failed to add to lists");
             }
+            usleep(200000);
         } elseif (!$execute && !empty($assignLists)) {
             output("    [DRY-RUN] Would assign to lists: " . implode(', ', $assignLists));
         }
@@ -545,11 +612,26 @@ try {
 
 finish:
 
+// ── Save checkpoint ─────────────────────────────────────────────────
+if ($execute && $newestTimestamp !== null) {
+    if (!is_dir($stateDir)) {
+        mkdir($stateDir, 0755, true);
+    }
+    file_put_contents($stateFile, json_encode([
+        'last_timestamp' => $newestTimestamp,
+        'updated_at' => date('Y-m-d H:i:s'),
+    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+    output("");
+    output("Checkpoint saved: \"{$newestTimestamp}\"");
+}
+
+output("");
 output("=== Summary ===");
 output("Total rows:         {$report['total_rows']}");
 output("Contacts found:     {$report['contacts_found']}");
 output("Contacts created:   {$report['contacts_created']}");
 output("Activities created: {$report['activities_created']}");
+output("Skipped (old):      {$report['skipped_old']}");
 output("Skipped (no email): {$report['skipped_no_email']}");
 output("Failed:             {$report['failed']}");
 
