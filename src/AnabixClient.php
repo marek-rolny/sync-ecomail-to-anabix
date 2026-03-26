@@ -231,6 +231,49 @@ class AnabixClient
         return null;
     }
 
+    /**
+     * Create a new contact in Anabix.
+     *
+     * @param array $data  Contact fields: firstName, lastName, email, phoneNumber, shippingCity, etc.
+     * @return array|null  Created contact data or null on failure
+     */
+    public function createContact(array $data): ?array
+    {
+        $response = $this->request('contacts', 'create', $data);
+
+        if ($response === null) {
+            $this->logger->error("Failed to create contact", ['data' => $data]);
+            return null;
+        }
+
+        return $response['data'] ?? $response;
+    }
+
+    /**
+     * Add a contact to a list (group) in Anabix.
+     *
+     * @param int $contactId  Contact ID
+     * @param int $listId     List ID
+     * @return bool  True if successful
+     */
+    public function addContactToList(int $contactId, int $listId): bool
+    {
+        $response = $this->request('lists', 'addContact', [
+            'idContact' => $contactId,
+            'idList' => $listId,
+        ]);
+
+        if ($response === null) {
+            $this->logger->error("Failed to add contact to list", [
+                'contact' => $contactId,
+                'list' => $listId,
+            ]);
+            return false;
+        }
+
+        return true;
+    }
+
     // ── Organizations ─────────────────────────────────────────────────
 
     /**
