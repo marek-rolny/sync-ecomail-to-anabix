@@ -231,6 +231,24 @@ class AnabixClient
         return null;
     }
 
+    /**
+     * Create a new contact in Anabix.
+     *
+     * @param array $data  Contact fields: firstName, lastName, email, phoneNumber, shippingCity, etc.
+     * @return array|null  Created contact data or null on failure
+     */
+    public function createContact(array $data): ?array
+    {
+        $response = $this->request('contacts', 'create', $data);
+
+        if ($response === null) {
+            $this->logger->error("Failed to create contact", ['data' => $data]);
+            return null;
+        }
+
+        return $response['data'] ?? $response;
+    }
+
     // ── Organizations ─────────────────────────────────────────────────
 
     /**
