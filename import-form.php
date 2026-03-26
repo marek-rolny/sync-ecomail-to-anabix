@@ -332,6 +332,10 @@ try {
     if ($idxEmail === null && $colEmail !== '') {
         throw new RuntimeException("Column '{$colEmail}' ({$prefix}COL_EMAIL) not found in sheet headers.");
     }
+    // Name column is required if no email column
+    if ($idxEmail === null && $idxName === null) {
+        throw new RuntimeException("Either {$prefix}COL_EMAIL or {$prefix}COL_NAME must be configured.");
+    }
 
     // Track which column indices are "contact" columns (not included in note)
     $contactColIndices = array_filter([$idxEmail, $idxName, $idxPhone, $idxCity, $idxTimestamp], fn($v) => $v !== null);
