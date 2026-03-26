@@ -73,25 +73,27 @@ class GoogleSheetsClient
     private function parseCsv(string $csv): array
     {
         $rows = [];
-        $lines = str_getcsv($csv, "\n");
 
-        if (empty($lines)) {
+        // Use fgetcsv with a stream to correctly handle newlines inside quoted fields
+        $stream = fopen('php://temp', 'r+');
+        fwrite($stream, $csv);
+        rewind($stream);
+
+        // First row is header
+        $headers = fgetcsv($stream);
+        if ($headers === false || empty($headers)) {
+            fclose($stream);
             return [];
         }
-
-        // First line is header
-        $headers = str_getcsv($lines[0]);
         $headers = array_map('trim', $headers);
 
-        for ($i = 1; $i < count($lines); $i++) {
-            $line = trim($lines[$i]);
-            if ($line === '') {
+        while (($values = fgetcsv($stream)) !== false) {
+            // Skip empty rows
+            if (count($values) === 1 && trim($values[0] ?? '') === '') {
                 continue;
             }
 
-            $values = str_getcsv($line);
-
-            // Skip rows with fewer columns than headers
+            // Pad if fewer columns than headers
             if (count($values) < count($headers)) {
                 $values = array_pad($values, count($headers), '');
             }
@@ -103,6 +105,8 @@ class GoogleSheetsClient
 
             $rows[] = $row;
         }
+
+        fclose($stream);
 
         $this->logger->info("Parsed Google Sheet rows", ['count' => count($rows)]);
 
