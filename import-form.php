@@ -401,14 +401,12 @@ try {
 
         // ── Assign contact to lists ─────────────────────────────────
         if ($execute && $contactId !== null && !empty($assignLists)) {
-            foreach ($assignLists as $listId) {
-                if ($anabix->addContactToList((int) $contactId, $listId)) {
-                    output("    Added to list #{$listId}");
-                } else {
-                    output("    WARNING: Failed to add to list #{$listId}");
-                }
-                usleep(200000);
+            if ($anabix->addContactToLists((int) $contactId, $assignLists)) {
+                output("    Added to lists: " . implode(', ', $assignLists));
+            } else {
+                output("    WARNING: Failed to add to lists");
             }
+            usleep(200000);
         } elseif (!$execute && !empty($assignLists)) {
             output("    [DRY-RUN] Would assign to lists: " . implode(', ', $assignLists));
         }
