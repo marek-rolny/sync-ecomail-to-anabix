@@ -326,7 +326,23 @@ try {
 
         $noteBody = implode("\n", $noteLines);
 
+        // ── Build internal evaluation notes (one per person) ────────────
+        $sheetUrl = "https://docs.google.com/spreadsheets/d/{$sheetId}/";
+        $internalNotes = []; // ['Dáška' => 'text', ...]
+
+        foreach ($headers as $idx => $header) {
+            $colName = trim($header);
+            if (!in_array($colName, $internalCols, true)) {
+                continue;
+            }
+            $value = trim($values[$idx] ?? '');
+            if ($value !== '') {
+                $internalNotes[$colName] = $value;
+            }
+        }
+
         if ($execute && $contactId !== null) {
+            // Activity 1: Form responses
             $result = $anabix->createActivity(
                 (int) $contactId,
                 'Dotazník: Copywriter',
@@ -338,22 +354,54 @@ try {
             usleep(300000);
 
             if ($result !== null) {
-                output("    Activity CREATED");
+                output("    Activity CREATED (form responses)");
                 $report['activities_created']++;
             } else {
-                output("    Activity CREATE FAILED");
+                output("    Activity CREATE FAILED (form responses)");
                 $report['failed']++;
-                $report['errors'][] = "Row {$rowNum}: Failed to create activity for {$email}";
+                $report['errors'][] = "Row {$rowNum}: Failed to create form activity for {$email}";
+            }
+
+            // Activities 2+: Internal evaluation notes (one per person)
+            foreach ($internalNotes as $person => $noteText) {
+                $internalBody = $noteText . "\n--\nzdroj: {$sheetUrl}\n--";
+
+                $result = $anabix->createActivity(
+                    (int) $contactId,
+                    "Poznámka {$person}",
+                    $internalBody,
+                    'note',
+                    null, // current timestamp
+                    $activityIdUser
+                );
+                usleep(300000);
+
+                if ($result !== null) {
+                    output("    Activity CREATED (Poznámka {$person})");
+                    $report['activities_created']++;
+                } else {
+                    output("    Activity CREATE FAILED (Poznámka {$person})");
+                    $report['failed']++;
+                    $report['errors'][] = "Row {$rowNum}: Failed to create note {$person} for {$email}";
+                }
             }
         } else {
             output("    [DRY-RUN] Note preview (" . mb_strlen($noteBody) . " chars):");
-            // Show first few lines
             $preview = array_slice(explode("\n", $noteBody), 0, 15);
             foreach ($preview as $line) {
                 output("      | {$line}");
             }
             if (count(explode("\n", $noteBody)) > 15) {
                 output("      | ...");
+            }
+
+            // Preview internal notes
+            if (!empty($internalNotes)) {
+                output("    [DRY-RUN] Internal notes:");
+                foreach ($internalNotes as $person => $noteText) {
+                    $short = mb_strlen($noteText) > 60 ? mb_substr($noteText, 0, 60) . '…' : $noteText;
+                    output("      | Poznámka {$person}: {$short}");
+                }
             }
         }
 
