@@ -333,12 +333,13 @@ try {
         }
 
         [$firstName, $lastName] = splitName($fullName);
+        $phoneReadable = $phone !== '' ? DataNormalizer::phoneToReadable($phone) : null;
         $phoneE164 = $phone !== '' ? DataNormalizer::phoneToE164($phone) : null;
         $city = cleanCity($cityRaw);
 
         output("  Row {$rowNum}: {$fullName} <{$email}>");
         if ($phone !== '') {
-            output("    Phone: {$phone} → " . ($phoneE164 ?? 'invalid'));
+            output("    Phone: {$phone} → " . ($phoneReadable ?? 'invalid'));
         }
         if ($cityRaw !== '') {
             output("    City: \"{$cityRaw}\" → \"{$city}\"");
@@ -356,13 +357,25 @@ try {
                 output("    Contact FOUND: #{$contactId}");
                 $report['contacts_found']++;
             } else {
+                // Parse GDPR acceptance date from timestamp
+                $gdprDate = '';
+                if ($timestamp !== '') {
+                    $gdprDate = DataNormalizer::normalizeDate($timestamp);
+                }
+
                 $contactData = [
                     'firstName' => $firstName,
                     'lastName' => $lastName,
                     'email' => $email,
+                    'idOwner' => $activityIdUser,
+                    'source' => $activityTitle,
+                    'gdprReason' => 5,
                 ];
-                if ($phoneE164 !== null) {
-                    $contactData['phoneNumber'] = $phoneE164;
+                if ($gdprDate !== '') {
+                    $contactData['gdprAcceptanceDate'] = $gdprDate;
+                }
+                if ($phoneReadable !== null) {
+                    $contactData['phoneNumber'] = $phoneReadable;
                 }
                 if ($city !== '') {
                     $contactData['shippingCity'] = $city;
