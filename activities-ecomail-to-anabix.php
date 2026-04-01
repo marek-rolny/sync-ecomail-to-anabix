@@ -183,182 +183,94 @@ try {
 
         output("Campaign #{$campaignId}: {$subject}");
 
-        // Fetch aggregate stats first for overview
-        $stats = $ecomail->getCampaignStats((int) $campaignId);
-        if ($stats !== null) {
-            output("  Stats: " . json_encode(array_intersect_key(
-                $stats,
-                array_flip(['total', 'sent', 'delivered', 'opened', 'clicked', 'bounced', 'unsubscribed', 'spam'])
-            )));
-        }
-
-        // Fetch per-subscriber detail events
-        $events = $ecomail->getCampaignEvents((int) $campaignId);
+        // Fetch campaign log — individual events per subscriber
+        $events = $ecomail->getCampaignLog((int) $campaignId);
 
         if (empty($events)) {
-            output("  No subscriber events from stats-detail.");
+            output("  No events in campaign log.");
             $report['campaigns_processed']++;
             continue;
         }
 
-        output("  Subscriber records: " . count($events));
+        output("  Events: " . count($events));
 
-        // Log first record structure for debugging
-        if (!empty($events)) {
-            $first = reset($events);
-            $logger->info("stats-detail first record structure", [
-                'campaignId' => $campaignId,
-                'keys' => is_array($first) ? array_keys($first) : gettype($first),
-                'sample' => is_array($first) ? json_encode($first) : $first,
-            ]);
-            output("  First record keys: " . (is_array($first) ? implode(', ', array_keys($first)) : gettype($first)));
-        }
+        // Cache anabixId lookups to avoid repeated API calls for same email
+        $anabixIdCache = [];
 
         foreach ($events as $event) {
-            $email = $event['email'] ?? $event['subscriber_email'] ?? '';
+            $email = $event['email'] ?? '';
+            $eventType = $event['event'] ?? '';
 
-            if ($email === '') {
+            if ($eventType === '' || $email === '') {
                 continue;
             }
 
-            // stats-detail may return per-subscriber status fields
-            // Possible formats:
-            //   1) Event-based: {email, event: "open"} or {email, type: "click"}
-            //   2) Status-based: {email, status: "delivered", opened: true, clicked: true, ...}
-            // We handle both by extracting individual event types from each record
-
-            $eventTypes = [];
-
-            // Format 1: explicit event/type field
-            $explicitType = $event['event'] ?? $event['type'] ?? '';
-            if ($explicitType !== '') {
-                $eventTypes[] = $explicitType;
-            }
-
-            // Format 2: boolean/flag fields per action
-            if (empty($eventTypes)) {
-                $statusMap = [
-                    'send' => ['sent', 'delivered', 'send'],
-                    'open' => ['opened', 'open', 'is_opened'],
-                    'click' => ['clicked', 'click', 'is_clicked'],
-                    'hard_bounce' => ['hard_bounce', 'hard_bounced'],
-                    'soft_bounce' => ['soft_bounce', 'soft_bounced'],
-                    'unsub' => ['unsubscribed', 'unsub', 'is_unsubscribed'],
-                    'spam' => ['spam', 'spam_complaint', 'is_spam'],
-                ];
-
-                foreach ($statusMap as $eventType => $possibleFields) {
-                    foreach ($possibleFields as $field) {
-                        $val = $event[$field] ?? null;
-                        if ($val !== null && $val !== false && $val !== 0 && $val !== '' && $val !== '0') {
-                            $eventTypes[] = $eventType;
-                            break;
-                        }
-                    }
-                }
-
-                // Also check a 'status' field that might be "delivered", "opened", etc.
-                $status = $event['status'] ?? '';
-                if ($status !== '' && empty($eventTypes)) {
-                    $statusToEvent = [
-                        'delivered' => 'send',
-                        'sent' => 'send',
-                        'opened' => 'open',
-                        'clicked' => 'click',
-                        'bounced' => 'hard_bounce',
-                        'hard_bounce' => 'hard_bounce',
-                        'soft_bounce' => 'soft_bounce',
-                        'unsubscribed' => 'unsub',
-                        'spam' => 'spam',
-                    ];
-                    $mapped = $statusToEvent[$status] ?? null;
-                    if ($mapped !== null) {
-                        $eventTypes[] = $mapped;
-                    }
-                }
-            }
-
-            if (empty($eventTypes)) {
-                $logger->debug("Skipping event record with no recognizable event type", [
-                    'email' => $email,
-                    'record_keys' => array_keys($event),
-                ]);
+            // Map event type to Anabix activity type
+            $activityType = $eventTypeMap[$eventType] ?? null;
+            if ($activityType === null) {
                 continue;
             }
 
-            // Get anabixId from subscriber's custom fields
-            $anabixId = $event['custom_fields']['anabixId']
-                ?? $event['merge_fields']['anabixId']
-                ?? $event['anabixId']
-                ?? null;
-
-            // If not in event data, try to fetch subscriber to get anabixId
-            if ($anabixId === null) {
+            // Get anabixId — use cache or fetch from Ecomail subscriber
+            if (!array_key_exists($email, $anabixIdCache)) {
                 $subscriber = $ecomail->getSubscriber($email);
-                $anabixId = $subscriber['custom_fields']['anabixId']
+                $anabixIdCache[$email] = $subscriber['custom_fields']['anabixId']
                     ?? $subscriber['merge_fields']['anabixId']
                     ?? null;
                 usleep(200000);
             }
+
+            $anabixId = $anabixIdCache[$email];
 
             if ($anabixId === null || (int) $anabixId === 0) {
                 $report['skipped_no_anabix_id']++;
                 continue;
             }
 
-            // Process each event type from this subscriber record
-            foreach ($eventTypes as $eventType) {
-                // Map event type to Anabix activity type
-                $activityType = $eventTypeMap[$eventType] ?? null;
-                if ($activityType === null) {
-                    continue;
-                }
-
-                // Deduplication key: campaign + contact + event type
-                $stateKey = md5("{$campaignId}|{$anabixId}|{$eventType}");
-                if (isset($processedKeys[$stateKey])) {
-                    $report['skipped_duplicate']++;
-                    continue;
-                }
-
-                // Build activity body
-                $body = "Stav: {$eventType}\n"
-                    . "Předmět: {$subject}\n"
-                    . "Od: {$fromName} | {$fromEmail}";
-                if ($archiveUrl !== '') {
-                    $body .= "\n{$archiveUrl}";
-                }
-
-                $activityTitle = $title;
-                $timestamp = $sentAt ?? date('Y-m-d H:i:s');
-
-                if ($dryRun) {
-                    output("  [DRY] {$email} (anabixId={$anabixId}): {$eventType} → {$activityType}");
-                    $report['activities_created']++;
-                    $processedKeys[$stateKey] = true;
-                    continue;
-                }
-
-                // Create activity in Anabix
-                $result = $anabix->createActivity(
-                    (int) $anabixId,
-                    $activityTitle,
-                    $body,
-                    $activityType,
-                    $timestamp,
-                    $activityIdUser
-                );
-
-                if ($result !== null) {
-                    $report['activities_created']++;
-                    $processedKeys[$stateKey] = true;
-                } else {
-                    $report['failed']++;
-                    $report['errors'][] = "Failed: campaign={$campaignId} email={$email} event={$eventType}";
-                }
-
-                usleep(200000); // rate limiting
+            // Deduplication key: campaign + contact + event type
+            $stateKey = md5("{$campaignId}|{$anabixId}|{$eventType}");
+            if (isset($processedKeys[$stateKey])) {
+                $report['skipped_duplicate']++;
+                continue;
             }
+
+            // Build activity body
+            $body = "Stav: {$eventType}\n"
+                . "Předmět: {$subject}\n"
+                . "Od: {$fromName} | {$fromEmail}";
+            if ($archiveUrl !== '') {
+                $body .= "\n{$archiveUrl}";
+            }
+
+            $activityTitle = $title;
+            $timestamp = $event['occured_at'] ?? $sentAt ?? date('Y-m-d H:i:s');
+
+            if ($dryRun) {
+                output("  [DRY] {$email} (anabixId={$anabixId}): {$eventType} → {$activityType}");
+                $report['activities_created']++;
+                $processedKeys[$stateKey] = true;
+                continue;
+            }
+
+            // Create activity in Anabix
+            $result = $anabix->createActivity(
+                (int) $anabixId,
+                $activityTitle,
+                $body,
+                $activityType,
+                $timestamp,
+                $activityIdUser
+            );
+
+            if ($result !== null) {
+                $report['activities_created']++;
+                $processedKeys[$stateKey] = true;
+            } else {
+                $report['failed']++;
+                $report['errors'][] = "Failed: campaign={$campaignId} email={$email} event={$eventType}";
+            }
+
+            usleep(200000); // rate limiting
         }
 
         $report['campaigns_processed']++;

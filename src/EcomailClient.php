@@ -269,68 +269,162 @@ class EcomailClient
     }
 
     /**
-     * Get detailed per-subscriber stats for a campaign (opens, clicks, bounces, etc.).
+     * Get per-subscriber stats for a campaign.
      *
      * Uses GET /campaigns/{campaignId}/stats-detail
-     * Supports query params for filtering (e.g. page, per_page).
+     * Response: { "subscribers": { "email@x.com": { "open": 2, "send": 1, ... } }, "total": N, "per_page": 100 }
      *
-     * @return array[]  List of subscriber event arrays
+     * @return array  Map of email => { open: int, send: int, click: int, ... }
      */
-    public function getCampaignEvents(int $campaignId, array $params = []): array
+    public function getCampaignStatsDetail(int $campaignId, array $params = []): array
     {
-        $allEvents = [];
+        $allSubscribers = [];
         $page = 1;
 
         while (true) {
-            $queryParams = array_merge($params, ['page' => $page]);
+            $queryParams = array_merge($params, ['page' => $page, 'per_page' => 100]);
             $response = $this->get("/campaigns/{$campaignId}/stats-detail", $queryParams);
-
-            $this->logger->debug("getCampaignEvents stats-detail response", [
-                'campaignId' => $campaignId,
-                'page' => $page,
-                'response_keys' => $response !== null ? array_keys($response) : null,
-                'data_count' => isset($response['data']) ? count($response['data']) : null,
-            ]);
 
             if ($response === null) {
                 break;
             }
 
-            $events = $response['data'] ?? $response ?? [];
+            $subscribers = $response['subscribers'] ?? [];
 
-            if (empty($events) || !is_array($events)) {
+            $this->logger->debug("getCampaignStatsDetail response", [
+                'campaignId' => $campaignId,
+                'page' => $page,
+                'subscriber_count' => count($subscribers),
+                'total' => $response['total'] ?? null,
+            ]);
+
+            if (empty($subscribers) || !is_array($subscribers)) {
                 break;
             }
 
-            // If response has non-list structure (aggregate stats), return as-is
-            $first = reset($events);
-            if (!is_array($first) && !isset($response['data'])) {
-                // Single response, not paginated list
-                return [$response];
+            foreach ($subscribers as $email => $stats) {
+                $allSubscribers[$email] = $stats;
             }
 
-            foreach ($events as $event) {
-                if (is_array($event)) {
-                    $allEvents[] = $event;
-                }
-            }
-
-            // Check if there are more pages
-            $totalPages = $response['total_pages'] ?? $response['last_page'] ?? null;
+            // Check pagination
+            $nextPageUrl = $response['next_page_url'] ?? null;
             $perPage = $response['per_page'] ?? 100;
 
-            if ($totalPages !== null && $page >= $totalPages) {
-                break;
-            }
-            if (count($events) < $perPage) {
+            if ($nextPageUrl === null || count($subscribers) < $perPage) {
                 break;
             }
 
             $page++;
-            usleep(300000); // rate limit courtesy
+            usleep(300000);
+        }
+
+        return $allSubscribers;
+    }
+
+    /**
+     * Get campaign log — individual events (sends, opens, clicks, bounces, etc.).
+     *
+     * Uses GET /campaigns/log with campaign_id filter.
+     * Response: { "campaign_log": [ { "id", "campaign_id", "event", "email", ... }, ... ] }
+     *
+     * Possible event types: send, open, click, hard_bounce, soft_bounce,
+     *                       out_of_band, unsub, spam, spam_complaint.
+     *
+     * @param int      $campaignId  Campaign to fetch events for
+     * @param string[] $events      Event types to filter (empty = all)
+     * @return array[]  List of event records
+     */
+    public function getCampaignLog(int $campaignId, array $events = []): array
+    {
+        $allEvents = [];
+        $page = 1;
+
+        while (true) {
+            $queryParams = [
+                'campaign_id' => $campaignId,
+                'per_page' => 100,
+                'page' => $page,
+                'sort_by' => 'occured_at',
+                'sort_dir' => 'desc',
+            ];
+
+            if (!empty($events)) {
+                $queryParams['events[]'] = implode(',', $events);
+            }
+
+            $response = $this->get('/campaigns/log', $queryParams);
+
+            if ($response === null) {
+                break;
+            }
+
+            $logs = $response['campaign_log'] ?? $response['data'] ?? [];
+
+            $this->logger->debug("getCampaignLog response", [
+                'campaignId' => $campaignId,
+                'page' => $page,
+                'log_count' => count($logs),
+                'response_keys' => array_keys($response),
+            ]);
+
+            if (empty($logs) || !is_array($logs)) {
+                break;
+            }
+
+            foreach ($logs as $log) {
+                if (is_array($log)) {
+                    $allEvents[] = $log;
+                }
+            }
+
+            if (count($logs) < 100) {
+                break;
+            }
+
+            $page++;
+            usleep(300000);
         }
 
         return $allEvents;
+    }
+
+    /**
+     * Get subscriber events for a campaign (backward-compatible wrapper).
+     *
+     * Tries campaign log first (individual events), falls back to stats-detail.
+     *
+     * @return array[]  List of event arrays with 'email' and 'event' keys
+     */
+    public function getCampaignEvents(int $campaignId): array
+    {
+        // Primary: campaign log — gives individual events
+        $events = $this->getCampaignLog($campaignId);
+
+        if (!empty($events)) {
+            return $events;
+        }
+
+        // Fallback: stats-detail — convert per-subscriber counts to events
+        $subscribers = $this->getCampaignStatsDetail($campaignId);
+
+        if (empty($subscribers)) {
+            return [];
+        }
+
+        $events = [];
+        foreach ($subscribers as $email => $stats) {
+            foreach ($stats as $eventType => $count) {
+                if (is_int($count) && $count > 0) {
+                    $events[] = [
+                        'email' => $email,
+                        'event' => $eventType,
+                        'count' => $count,
+                    ];
+                }
+            }
+        }
+
+        return $events;
     }
 
     /**
