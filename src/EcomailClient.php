@@ -257,22 +257,80 @@ class EcomailClient
     }
 
     /**
-     * Get subscriber events for a campaign (sends, opens, clicks, bounces, etc.).
+     * Get aggregate stats for a campaign (total sends, opens, clicks, etc.).
      *
-     * @return array[]  List of event arrays
+     * Uses GET /campaigns/{campaignId}/stats
+     *
+     * @return array|null  Stats array or null on failure
      */
-    public function getCampaignEvents(int $campaignId): array
+    public function getCampaignStats(int $campaignId): ?array
     {
-        $response = $this->get("/campaigns/{$campaignId}/response");
+        return $this->get("/campaigns/{$campaignId}/stats");
+    }
 
-        $this->logger->debug("getCampaignEvents raw response", [
-            'campaignId' => $campaignId,
-            'response_keys' => $response !== null ? array_keys($response) : null,
-            'data_count' => isset($response['data']) ? count($response['data']) : null,
-            'raw_preview' => $response !== null ? json_encode(array_slice($response, 0, 3)) : null,
-        ]);
+    /**
+     * Get detailed per-subscriber stats for a campaign (opens, clicks, bounces, etc.).
+     *
+     * Uses GET /campaigns/{campaignId}/stats-detail
+     * Supports query params for filtering (e.g. page, per_page).
+     *
+     * @return array[]  List of subscriber event arrays
+     */
+    public function getCampaignEvents(int $campaignId, array $params = []): array
+    {
+        $allEvents = [];
+        $page = 1;
 
-        return $response['data'] ?? $response ?? [];
+        while (true) {
+            $queryParams = array_merge($params, ['page' => $page]);
+            $response = $this->get("/campaigns/{$campaignId}/stats-detail", $queryParams);
+
+            $this->logger->debug("getCampaignEvents stats-detail response", [
+                'campaignId' => $campaignId,
+                'page' => $page,
+                'response_keys' => $response !== null ? array_keys($response) : null,
+                'data_count' => isset($response['data']) ? count($response['data']) : null,
+            ]);
+
+            if ($response === null) {
+                break;
+            }
+
+            $events = $response['data'] ?? $response ?? [];
+
+            if (empty($events) || !is_array($events)) {
+                break;
+            }
+
+            // If response has non-list structure (aggregate stats), return as-is
+            $first = reset($events);
+            if (!is_array($first) && !isset($response['data'])) {
+                // Single response, not paginated list
+                return [$response];
+            }
+
+            foreach ($events as $event) {
+                if (is_array($event)) {
+                    $allEvents[] = $event;
+                }
+            }
+
+            // Check if there are more pages
+            $totalPages = $response['total_pages'] ?? $response['last_page'] ?? null;
+            $perPage = $response['per_page'] ?? 100;
+
+            if ($totalPages !== null && $page >= $totalPages) {
+                break;
+            }
+            if (count($events) < $perPage) {
+                break;
+            }
+
+            $page++;
+            usleep(300000); // rate limit courtesy
+        }
+
+        return $allEvents;
     }
 
     /**
