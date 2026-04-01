@@ -265,6 +265,13 @@ class EcomailClient
     {
         $response = $this->get("/campaigns/{$campaignId}/response");
 
+        $this->logger->debug("getCampaignEvents raw response", [
+            'campaignId' => $campaignId,
+            'response_keys' => $response !== null ? array_keys($response) : null,
+            'data_count' => isset($response['data']) ? count($response['data']) : null,
+            'raw_preview' => $response !== null ? json_encode(array_slice($response, 0, 3)) : null,
+        ]);
+
         return $response['data'] ?? $response ?? [];
     }
 
