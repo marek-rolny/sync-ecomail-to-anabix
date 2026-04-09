@@ -76,9 +76,16 @@ foreach ($required as $var) {
 if (php_sapi_name() === 'cli') {
     $dryRun = in_array('--dry-run', $argv ?? [], true);
     $fullRun = in_array('--full', $argv ?? [], true);
+    $testEmail = null;
+    foreach ($argv ?? [] as $arg) {
+        if (str_starts_with($arg, '--email=')) {
+            $testEmail = substr($arg, 8);
+        }
+    }
 } else {
     $dryRun = ($_GET['dry-run'] ?? '') === '1';
     $fullRun = ($_GET['full'] ?? '') === '1';
+    $testEmail = $_GET['email'] ?? null;
 }
 
 // ── Initialize ────────────────────────────────────────────────────────
@@ -236,8 +243,19 @@ $runTimestamp = date('Y-m-d H:i:s');
 try {
     // ── 1. Fetch subscribers ─────────────────────────────────────────
 
-    output("Fetching subscribers from Ecomail list #" . env('ECOMAIL_LIST_ID') . "...");
-    $subscribers = $ecomail->getSubscribers();
+    if ($testEmail !== null && $testEmail !== '') {
+        output("TEST MODE: single subscriber {$testEmail}");
+        $sub = $ecomail->getSubscriber($testEmail);
+        if ($sub === null) {
+            output("Subscriber not found: {$testEmail}");
+            goto finish;
+        }
+        $subscribers = [$sub];
+    } else {
+        output("Fetching subscribers from Ecomail list #" . env('ECOMAIL_LIST_ID') . "...");
+        $subscribers = $ecomail->getSubscribers();
+    }
+
     $report['subscribers_total'] = count($subscribers);
     output("Subscribers: {$report['subscribers_total']}");
     output("");
@@ -269,7 +287,7 @@ try {
         $report['subscribers_with_anabix_id']++;
 
         $subNum = $subIndex + 1;
-        $isDebug = $subIndex < 3; // debug first 3 subscribers
+        $isDebug = $subIndex < 3 || $testEmail !== null; // debug first 3 or test mode
 
         // ── 2a. Email log (campaign events) ──────────────────────────
 
@@ -413,7 +431,7 @@ try {
         }
 
         // In debug mode (first run / dry-run), stop after 5 subscribers to save time
-        if ($dryRun && $subIndex >= 4) {
+        if ($dryRun && $testEmail === null && $subIndex >= 4) {
             output("");
             output("  (DRY-RUN: stopped after 5 subscribers for quick preview)");
             break;
