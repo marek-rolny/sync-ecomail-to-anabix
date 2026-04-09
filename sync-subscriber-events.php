@@ -293,14 +293,15 @@ try {
 
         $emailLogEvents = $ecomail->getSubscriberEmailLog($email);
 
-        if ($isDebug && empty($emailLogEvents)) {
-            // Debug: fetch raw response to see what the API actually returns
+        if ($isDebug) {
             $debugResponse = $ecomail->debugGet("/subscribers/" . urlencode($email) . "/email-log", ['per_page' => 5]);
-            output("  [{$subNum}] {$email} (anabixId={$anabixId}) — email-log DEBUG:");
-            output("    Response keys: " . ($debugResponse !== null ? implode(', ', array_keys($debugResponse)) : 'NULL'));
-            if ($debugResponse !== null) {
-                output("    Raw (first 500 chars): " . mb_substr(json_encode($debugResponse, JSON_UNESCAPED_UNICODE), 0, 500));
+            output("  [{$subNum}] {$email} (anabixId={$anabixId})");
+            output("    email-log HTTP {$debugResponse['_debug_http_code']}:");
+            if ($debugResponse['_debug_curl_error']) {
+                output("    cURL error: {$debugResponse['_debug_curl_error']}");
             }
+            output("    URL: {$debugResponse['_debug_url']}");
+            output("    Body: " . mb_substr($debugResponse['_debug_body'], 0, 500));
         } else {
             output("  [{$subNum}/{$report['subscribers_total']}] {$email} (anabixId={$anabixId}) — emails: " . count($emailLogEvents));
         }
@@ -365,15 +366,13 @@ try {
         $automationLogEvents = $ecomail->getSubscriberAutomationLog($email);
         $report['automation_log_events'] += count($automationLogEvents);
 
-        if ($isDebug && empty($automationLogEvents)) {
-            $debugResponse = $ecomail->debugGet("/subscribers/" . urlencode($email) . "/automation-log", ['per_page' => 5]);
-            output("    automation-log DEBUG:");
-            output("    Response keys: " . ($debugResponse !== null ? implode(', ', array_keys($debugResponse)) : 'NULL'));
-            if ($debugResponse !== null) {
-                output("    Raw (first 500 chars): " . mb_substr(json_encode($debugResponse, JSON_UNESCAPED_UNICODE), 0, 500));
+        if ($isDebug) {
+            output("    automation-log: " . count($automationLogEvents) . " events");
+            if (!empty($automationLogEvents)) {
+                $first = reset($automationLogEvents);
+                output("    First event keys: " . implode(', ', array_keys($first)));
+                output("    First event: " . mb_substr(json_encode($first, JSON_UNESCAPED_UNICODE), 0, 500));
             }
-        } elseif ($isDebug) {
-            output("    automations: " . count($automationLogEvents));
         }
 
         foreach ($automationLogEvents as $event) {

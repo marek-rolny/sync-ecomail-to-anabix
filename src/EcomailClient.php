@@ -599,11 +599,39 @@ class EcomailClient
     // ── HTTP methods ──────────────────────────────────────────────────
 
     /**
-     * Public debug wrapper for GET requests — returns raw parsed response.
+     * Public debug wrapper for GET requests — returns raw parsed response
+     * including HTTP status code and raw body for debugging.
      */
     public function debugGet(string $endpoint, array $params = []): ?array
     {
-        return $this->httpRequest('GET', $endpoint, $params);
+        $url = $this->baseUrl . $endpoint;
+        if (!empty($params)) {
+            $url .= '?' . http_build_query($params);
+        }
+
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $url,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER => [
+                'key: ' . $this->apiKey,
+                'Content-Type: application/json',
+            ],
+            CURLOPT_TIMEOUT => 30,
+        ]);
+
+        $body = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error = curl_error($ch);
+        curl_close($ch);
+
+        return [
+            '_debug_http_code' => $httpCode,
+            '_debug_curl_error' => $error ?: null,
+            '_debug_url' => $url,
+            '_debug_body' => mb_substr($body ?: '', 0, 1000),
+            '_debug_parsed' => json_decode($body ?: '', true),
+        ];
     }
 
     private function post(string $endpoint, array $data): ?array
