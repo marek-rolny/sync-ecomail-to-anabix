@@ -29,6 +29,10 @@
  *   php activities-ecomail-to-anabix.php --dry-run
  */
 
+// ── Error reporting (always show errors for diagnostics) ─────────────
+error_reporting(E_ALL);
+ini_set('display_errors', '1');
+
 // ── Web compatibility: prevent proxy timeout ─────────────────────────
 set_time_limit(0);
 ini_set('max_execution_time', '0');
@@ -76,9 +80,13 @@ foreach ($required as $var) {
     }
 }
 
-// ── CLI arguments ─────────────────────────────────────────────────────
+// ── CLI / web arguments ──────────────────────────────────────────────
 
-$dryRun = in_array('--dry-run', $argv ?? [], true);
+if (php_sapi_name() === 'cli') {
+    $dryRun = in_array('--dry-run', $argv ?? [], true);
+} else {
+    $dryRun = ($_GET['dry-run'] ?? '') === '1';
+}
 
 // ── Initialize ────────────────────────────────────────────────────────
 
