@@ -506,24 +506,28 @@ class EcomailClient
      */
     public function getSubscriberEmailLog(string $email, array $params = []): array
     {
-        $encoded = urlencode($email);
+        // /subscribers/{email}/email-log returns 403 on some accounts.
+        // Use /campaigns/log?email=... instead — same data, works universally.
         $allEvents = [];
         $page = 1;
 
         while (true) {
             $queryParams = array_merge($params, [
+                'email' => $email,
                 'per_page' => 100,
                 'page' => $page,
+                'sort_by' => 'occured_at',
+                'sort_dir' => 'desc',
             ]);
 
-            $response = $this->get("/subscribers/{$encoded}/email-log", $queryParams);
+            $response = $this->get('/campaigns/log', $queryParams);
 
             if ($response === null) {
                 break;
             }
 
-            // API returns: {"current_page":1,"data":[{...}],"per_page":10,"total":N}
-            $logs = $response['data'] ?? $response['email_log'] ?? $response['campaign_log'] ?? [];
+            // API returns: {"campaign_log":[{...}]}
+            $logs = $response['campaign_log'] ?? $response['data'] ?? [];
 
             if (empty($logs) || !is_array($logs)) {
                 break;
