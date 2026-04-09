@@ -299,15 +299,6 @@ try {
         $automationLogEvents = $ecomail->getSubscriberAutomationLog($email);
         $report['automation_log_events'] += count($automationLogEvents);
 
-        if ($isDebug) {
-            output("    automation-log: " . count($automationLogEvents) . " events");
-            if (!empty($automationLogEvents)) {
-                $first = reset($automationLogEvents);
-                output("    First event keys: " . implode(', ', array_keys($first)));
-                output("    First event: " . mb_substr(json_encode($first, JSON_UNESCAPED_UNICODE), 0, 500));
-            }
-        }
-
         foreach ($automationLogEvents as $event) {
             // automation-log records have no 'event' field — they are pipeline
             // execution records: {pipeline_id, action_id, trigger_id, timestamp}
