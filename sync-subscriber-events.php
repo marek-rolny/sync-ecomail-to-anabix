@@ -293,14 +293,15 @@ try {
 
         $emailLogEvents = $ecomail->getSubscriberEmailLog($email);
 
-        if ($isDebug && empty($emailLogEvents)) {
-            // Debug: fetch raw response to see what the API actually returns
+        if ($isDebug) {
             $debugResponse = $ecomail->debugGet("/subscribers/" . urlencode($email) . "/email-log", ['per_page' => 5]);
-            output("  [{$subNum}] {$email} (anabixId={$anabixId}) — email-log DEBUG:");
-            output("    Response keys: " . ($debugResponse !== null ? implode(', ', array_keys($debugResponse)) : 'NULL'));
-            if ($debugResponse !== null) {
-                output("    Raw (first 500 chars): " . mb_substr(json_encode($debugResponse, JSON_UNESCAPED_UNICODE), 0, 500));
+            output("  [{$subNum}] {$email} (anabixId={$anabixId})");
+            output("    email-log HTTP {$debugResponse['_debug_http_code']}:");
+            if ($debugResponse['_debug_curl_error']) {
+                output("    cURL error: {$debugResponse['_debug_curl_error']}");
             }
+            output("    URL: {$debugResponse['_debug_url']}");
+            output("    Body: " . mb_substr($debugResponse['_debug_body'], 0, 500));
         } else {
             output("  [{$subNum}/{$report['subscribers_total']}] {$email} (anabixId={$anabixId}) — emails: " . count($emailLogEvents));
         }
@@ -324,14 +325,32 @@ try {
                 continue;
             }
 
-            // Determine title
-            $title = $event['subject'] ?? $event['campaign_subject'] ?? $event['campaign_name'] ?? '';
-            if ($title === '') {
-                $title = "Kampaň #{$event['campaign_id']}";
+            // email-log fields: campaign_id, autoresponder_id, mail_name, event, url, occured_at
+            $mailName = $event['mail_name'] ?? '';
+            $campaignId = $event['campaign_id'] ?? '';
+            $autoresponderId = $event['autoresponder_id'] ?? '';
+
+            if ($mailName !== '') {
+                $title = $mailName;
+            } elseif ($autoresponderId !== '') {
+                $title = "Autoresponder #{$autoresponderId}";
+            } elseif ($campaignId !== '') {
+                $title = "Kampaň #{$campaignId}";
+            } else {
+                $title = "Email event";
             }
 
-            $body = buildActivityBody($event, 'Kampaň');
-            $timestamp = $event['occured_at'] ?? $event['timestamp'] ?? null;
+            $bodyLines = ["Stav: {$eventType}"];
+            if ($mailName !== '') { $bodyLines[] = "Email: {$mailName}"; }
+            if ($campaignId !== '') { $bodyLines[] = "Kampaň: #{$campaignId}"; }
+            if ($autoresponderId !== '') { $bodyLines[] = "Autoresponder: #{$autoresponderId}"; }
+            $url = $event['url'] ?? '';
+            if ($url !== '') { $bodyLines[] = "URL: {$url}"; }
+            $occuredAt = $event['occured_at'] ?? '';
+            if ($occuredAt !== '') { $bodyLines[] = "Datum: {$occuredAt}"; }
+            $body = implode("\n", $bodyLines);
+
+            $timestamp = $event['occured_at'] ?? null;
 
             if ($dryRun) {
                 output("    [DRY] campaign {$eventType}: {$title}");
@@ -365,26 +384,22 @@ try {
         $automationLogEvents = $ecomail->getSubscriberAutomationLog($email);
         $report['automation_log_events'] += count($automationLogEvents);
 
-        if ($isDebug && empty($automationLogEvents)) {
-            $debugResponse = $ecomail->debugGet("/subscribers/" . urlencode($email) . "/automation-log", ['per_page' => 5]);
-            output("    automation-log DEBUG:");
-            output("    Response keys: " . ($debugResponse !== null ? implode(', ', array_keys($debugResponse)) : 'NULL'));
-            if ($debugResponse !== null) {
-                output("    Raw (first 500 chars): " . mb_substr(json_encode($debugResponse, JSON_UNESCAPED_UNICODE), 0, 500));
+        if ($isDebug) {
+            output("    automation-log: " . count($automationLogEvents) . " events");
+            if (!empty($automationLogEvents)) {
+                $first = reset($automationLogEvents);
+                output("    First event keys: " . implode(', ', array_keys($first)));
+                output("    First event: " . mb_substr(json_encode($first, JSON_UNESCAPED_UNICODE), 0, 500));
             }
-        } elseif ($isDebug) {
-            output("    automations: " . count($automationLogEvents));
         }
 
         foreach ($automationLogEvents as $event) {
-            $eventType = $event['event'] ?? '';
-            if ($eventType === '') {
-                continue;
-            }
-
-            $activityType = $eventTypeMap[$eventType] ?? null;
-            if ($activityType === null) {
-                $report['skipped_unmapped']++;
+            // automation-log records have no 'event' field — they are pipeline
+            // execution records: {pipeline_id, action_id, trigger_id, timestamp}
+            // We create a 'note' activity for each pipeline execution.
+            $pipelineId = $event['pipeline_id'] ?? '';
+            $actionId   = $event['action_id'] ?? '';
+            if ($pipelineId === '' && $actionId === '') {
                 continue;
             }
 
@@ -394,17 +409,27 @@ try {
                 continue;
             }
 
-            // Determine title
-            $title = $event['pipeline_name'] ?? $event['automation_name'] ?? $event['action_name'] ?? '';
-            if ($title === '') {
-                $title = "Automatizace #{$event['pipeline_id']}";
-            }
+            $title = "Automatizace #{$pipelineId}";
+            $timestamp = $event['timestamp'] ?? null;
 
-            $body = buildActivityBody($event, 'Automatizace');
-            $timestamp = $event['occured_at'] ?? $event['timestamp'] ?? null;
+            $bodyLines = ["Spuštěna automatizace"];
+            if ($pipelineId !== '') {
+                $bodyLines[] = "Pipeline: #{$pipelineId}";
+            }
+            if ($actionId !== '') {
+                $bodyLines[] = "Akce: {$actionId}";
+            }
+            $triggerId = $event['trigger_id'] ?? '';
+            if ($triggerId !== '') {
+                $bodyLines[] = "Trigger: {$triggerId}";
+            }
+            if ($timestamp !== '') {
+                $bodyLines[] = "Datum: {$timestamp}";
+            }
+            $body = implode("\n", $bodyLines);
 
             if ($dryRun) {
-                output("    [DRY] automation {$eventType}: {$title}");
+                output("    [DRY] automation note: {$title}");
                 $report['activities_created']++;
                 $processedKeys[$deduKey] = true;
                 continue;
@@ -414,7 +439,7 @@ try {
                 $anabixId,
                 $title,
                 $body,
-                $activityType,
+                'note',
                 $timestamp,
                 $activityIdUser
             );
@@ -424,7 +449,86 @@ try {
                 $processedKeys[$deduKey] = true;
             } else {
                 $report['failed']++;
-                $report['errors'][] = "Failed: {$email} automation {$eventType}";
+                $report['errors'][] = "Failed: {$email} automation #{$pipelineId}";
+            }
+
+            usleep(200000);
+        }
+
+        // ── 2c. Tracker events (web visits, basket, purchase, etc.) ──
+
+        $trackerEvents = $ecomail->getSubscriberEvents($email);
+        $report['tracker_events'] = ($report['tracker_events'] ?? 0) + count($trackerEvents);
+
+        foreach ($trackerEvents as $event) {
+            $action   = $event['action'] ?? '';
+            $category = $event['category'] ?? '';
+            if ($action === '' && $category === '') {
+                continue;
+            }
+
+            $deduKey = md5("tracker|{$anabixId}|" . ($event['id'] ?? '') . "|{$action}|" . ($event['timestamp'] ?? ''));
+            if (isset($processedKeys[$deduKey])) {
+                $report['skipped_duplicate']++;
+                continue;
+            }
+
+            // Extract URL from property or value JSON
+            $url = '';
+            $property = $event['property'] ?? '';
+            if ($property !== '') {
+                $url = $property;
+            } else {
+                $valueRaw = $event['value'] ?? '';
+                if ($valueRaw !== '') {
+                    $valueParsed = json_decode($valueRaw, true);
+                    $url = $valueParsed['url']
+                        ?? $valueParsed['data']['url']
+                        ?? $valueParsed['data']['data']['url']
+                        ?? '';
+                }
+            }
+
+            // Title: "Návštěva webu {domain}"
+            $domain = '';
+            if ($url !== '') {
+                $parsed = parse_url($url);
+                $domain = $parsed['host'] ?? '';
+                $domain = preg_replace('/^www\./', '', $domain);
+            }
+            $title = 'Návštěva webu' . ($domain !== '' ? " {$domain}" : '');
+
+            $bodyLines = [];
+            if ($url !== '')      { $bodyLines[] = "URL: {$url}"; }
+            if ($action !== '' && $action !== 'pageview') { $bodyLines[] = "Akce: {$action}"; }
+            if ($category !== '') { $bodyLines[] = "Kategorie: {$category}"; }
+
+            $timestamp = $event['timestamp'] ?? null;
+            if ($timestamp !== '') { $bodyLines[] = "Datum: {$timestamp}"; }
+            $body = implode("\n", $bodyLines);
+
+            if ($dryRun) {
+                output("    [DRY] tracker note: {$title}");
+                $report['activities_created']++;
+                $processedKeys[$deduKey] = true;
+                continue;
+            }
+
+            $result = $anabix->createActivity(
+                $anabixId,
+                $title,
+                $body,
+                'note',
+                $timestamp,
+                $activityIdUser
+            );
+
+            if ($result !== null) {
+                $report['activities_created']++;
+                $processedKeys[$deduKey] = true;
+            } else {
+                $report['failed']++;
+                $report['errors'][] = "Failed: {$email} tracker {$action}";
             }
 
             usleep(200000);
@@ -485,6 +589,7 @@ output("Subscribers with ID:     {$report['subscribers_with_anabix_id']}");
 output("Subscribers skipped:     {$report['subscribers_skipped']}");
 output("Email log events:        {$report['email_log_events']}");
 output("Automation log events:   {$report['automation_log_events']}");
+output("Tracker events:          " . ($report['tracker_events'] ?? 0));
 output("Activities created:      {$report['activities_created']}");
 output("Skipped (duplicate):     {$report['skipped_duplicate']}");
 output("Skipped (unmapped):      {$report['skipped_unmapped']}");
