@@ -598,6 +598,14 @@ class EcomailClient
 
     // ── HTTP methods ──────────────────────────────────────────────────
 
+    /**
+     * Public debug wrapper for GET requests — returns raw parsed response.
+     */
+    public function debugGet(string $endpoint, array $params = []): ?array
+    {
+        return $this->httpRequest('GET', $endpoint, $params);
+    }
+
     private function post(string $endpoint, array $data): ?array
     {
         return $this->httpRequest('POST', $endpoint, $data);
