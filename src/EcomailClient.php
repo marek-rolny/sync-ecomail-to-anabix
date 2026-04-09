@@ -522,7 +522,8 @@ class EcomailClient
                 break;
             }
 
-            $logs = $response['email_log'] ?? $response['campaign_log'] ?? $response['data'] ?? [];
+            // API returns: {"current_page":1,"data":[{...}],"per_page":10,"total":N}
+            $logs = $response['data'] ?? $response['email_log'] ?? $response['campaign_log'] ?? [];
 
             if (empty($logs) || !is_array($logs)) {
                 break;
@@ -693,6 +694,10 @@ class EcomailClient
         }
 
         if ($httpCode < 200 || $httpCode >= 300) {
+            // 404 on subscriber log endpoints = subscriber has no records (treat as empty)
+            if ($httpCode === 404 && preg_match('#/subscribers/.+/(email-log|automation-log|events)#', $endpoint)) {
+                return [];
+            }
             $this->logger->error("Ecomail HTTP error", [
                 'http_code' => $httpCode,
                 'response' => $this->parseErrorMessage($responseBody),

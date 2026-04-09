@@ -325,14 +325,32 @@ try {
                 continue;
             }
 
-            // Determine title
-            $title = $event['subject'] ?? $event['campaign_subject'] ?? $event['campaign_name'] ?? '';
-            if ($title === '') {
-                $title = "Kampaň #{$event['campaign_id']}";
+            // email-log fields: campaign_id, autoresponder_id, mail_name, event, url, occured_at
+            $mailName = $event['mail_name'] ?? '';
+            $campaignId = $event['campaign_id'] ?? '';
+            $autoresponderId = $event['autoresponder_id'] ?? '';
+
+            if ($mailName !== '') {
+                $title = $mailName;
+            } elseif ($autoresponderId !== '') {
+                $title = "Autoresponder #{$autoresponderId}";
+            } elseif ($campaignId !== '') {
+                $title = "Kampaň #{$campaignId}";
+            } else {
+                $title = "Email event";
             }
 
-            $body = buildActivityBody($event, 'Kampaň');
-            $timestamp = $event['occured_at'] ?? $event['timestamp'] ?? null;
+            $bodyLines = ["Stav: {$eventType}"];
+            if ($mailName !== '') { $bodyLines[] = "Email: {$mailName}"; }
+            if ($campaignId !== '') { $bodyLines[] = "Kampaň: #{$campaignId}"; }
+            if ($autoresponderId !== '') { $bodyLines[] = "Autoresponder: #{$autoresponderId}"; }
+            $url = $event['url'] ?? '';
+            if ($url !== '') { $bodyLines[] = "URL: {$url}"; }
+            $occuredAt = $event['occured_at'] ?? '';
+            if ($occuredAt !== '') { $bodyLines[] = "Datum: {$occuredAt}"; }
+            $body = implode("\n", $bodyLines);
+
+            $timestamp = $event['occured_at'] ?? null;
 
             if ($dryRun) {
                 output("    [DRY] campaign {$eventType}: {$title}");
@@ -376,14 +394,12 @@ try {
         }
 
         foreach ($automationLogEvents as $event) {
-            $eventType = $event['event'] ?? '';
-            if ($eventType === '') {
-                continue;
-            }
-
-            $activityType = $eventTypeMap[$eventType] ?? null;
-            if ($activityType === null) {
-                $report['skipped_unmapped']++;
+            // automation-log records have no 'event' field — they are pipeline
+            // execution records: {pipeline_id, action_id, trigger_id, timestamp}
+            // We create a 'note' activity for each pipeline execution.
+            $pipelineId = $event['pipeline_id'] ?? '';
+            $actionId   = $event['action_id'] ?? '';
+            if ($pipelineId === '' && $actionId === '') {
                 continue;
             }
 
@@ -393,17 +409,27 @@ try {
                 continue;
             }
 
-            // Determine title
-            $title = $event['pipeline_name'] ?? $event['automation_name'] ?? $event['action_name'] ?? '';
-            if ($title === '') {
-                $title = "Automatizace #{$event['pipeline_id']}";
-            }
+            $title = "Automatizace #{$pipelineId}";
+            $timestamp = $event['timestamp'] ?? null;
 
-            $body = buildActivityBody($event, 'Automatizace');
-            $timestamp = $event['occured_at'] ?? $event['timestamp'] ?? null;
+            $bodyLines = ["Spuštěna automatizace"];
+            if ($pipelineId !== '') {
+                $bodyLines[] = "Pipeline: #{$pipelineId}";
+            }
+            if ($actionId !== '') {
+                $bodyLines[] = "Akce: {$actionId}";
+            }
+            $triggerId = $event['trigger_id'] ?? '';
+            if ($triggerId !== '') {
+                $bodyLines[] = "Trigger: {$triggerId}";
+            }
+            if ($timestamp !== '') {
+                $bodyLines[] = "Datum: {$timestamp}";
+            }
+            $body = implode("\n", $bodyLines);
 
             if ($dryRun) {
-                output("    [DRY] automation {$eventType}: {$title}");
+                output("    [DRY] automation note: {$title}");
                 $report['activities_created']++;
                 $processedKeys[$deduKey] = true;
                 continue;
@@ -413,7 +439,7 @@ try {
                 $anabixId,
                 $title,
                 $body,
-                $activityType,
+                'note',
                 $timestamp,
                 $activityIdUser
             );
@@ -423,7 +449,7 @@ try {
                 $processedKeys[$deduKey] = true;
             } else {
                 $report['failed']++;
-                $report['errors'][] = "Failed: {$email} automation {$eventType}";
+                $report['errors'][] = "Failed: {$email} automation #{$pipelineId}";
             }
 
             usleep(200000);
