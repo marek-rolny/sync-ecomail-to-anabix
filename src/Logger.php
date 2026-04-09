@@ -27,6 +27,11 @@ class Logger
         $this->write('WARNING', $message, $context);
     }
 
+    public function debug(string $message, array $context = []): void
+    {
+        $this->write('DEBUG', $message, $context);
+    }
+
     private function write(string $level, string $message, array $context): void
     {
         $date = date('Y-m-d');

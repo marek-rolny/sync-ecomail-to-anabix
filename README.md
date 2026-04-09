@@ -1,13 +1,51 @@
-# Sync Ecomail to Anabix
+# Anabix ↔ Ecomail Sync
 
-Synchronizace kontaktů z Ecomailu (webform/seznam) do Anabix CRM.
+Synchronizace kontaktů a aktivit mezi Anabix CRM a Ecomail.
 
-## Funkce
+## Skripty
 
-- **Polling sync** (`sync.php`): Načte všechny kontakty z Ecomail seznamu a vytvoří/aktualizuje je v Anabixu
-- **Webhook receiver** (`webhook.php`): Přijímá webhooky z Ecomailu při přidání nového kontaktu
-- **Delta sync**: Sleduje, které kontakty již byly synced (neposílá duplicity)
-- **Automatické zařazení** do skupin v Anabixu (konfigurovatelné)
+### 1. `contacts-anabix-to-ecomail.php` — Kontakty: Anabix → Ecomail
+
+Hlavní synchronizační skript. Načte kontakty z Anabixu, transformuje je a hromadně importuje do Ecomail listu.
+
+**Klíčové funkce:**
+- Delta sync (pouze změny od posledního běhu) s lookback oknem
+- Fallback na full export pokud delta vrátí 0
+- Organizace: paralelní fetch (curl_multi) + JSON cache
+- Členství v seznamech → Ecomail tagy
+- Pretitle/surtitle extrakce z Anabix `title` pole
+- Owner mapa (idOwner → jméno) pro custom field `projectManager`
+- Konfigurovatelné custom fields přes `ANABIX_CF_*` env vars
+- Hromadný import (subscribe-bulk) v dávkách
+
+```bash
+php contacts-anabix-to-ecomail.php
+```
+
+### 2. `activities-ecomail-to-anabix.php` — Aktivity: Ecomail → Anabix
+
+Čte kampaně a email eventy z Ecomailu, mapuje je na kontakty v Anabixu přes `*|anabixId|*` custom field a vytváří aktivity.
+
+**Mapování eventů:**
+| Ecomail event | Anabix typ aktivity |
+|--------------|-------------------|
+| send | sent newsletter |
+| open | opened newsletter |
+| click | clicked newsletter |
+| hard_bounce, soft_bounce, unsub, spam, spam_complaint | note |
+
+```bash
+php activities-ecomail-to-anabix.php
+php activities-ecomail-to-anabix.php --dry-run
+```
+
+### 3. `sync-sheets.php` — Google Sheets → Anabix aktivity
+
+Čte řádky z veřejné Google tabulky a vytváří aktivity (poznámky) u kontaktů v Anabixu.
+
+```bash
+php sync-sheets.php
+```
 
 ## Instalace
 
@@ -16,80 +54,73 @@ Synchronizace kontaktů z Ecomailu (webform/seznam) do Anabix CRM.
    cp .env.example .env
    ```
 
-2. Vyplňte konfiguraci v `.env`:
-   - `ECOMAIL_API_KEY` - API klíč z Ecomailu (Nastavení > Integrace)
-   - `ECOMAIL_LIST_ID` - ID seznamu v Ecomailu
-   - `ANABIX_API_USER` - Uživatelské jméno pro Anabix API
-   - `ANABIX_API_TOKEN` - Token pro Anabix API
-   - `ANABIX_API_URL` - URL vašeho Anabix účtu (`https://FIRMA.anabix.cz/api`)
-   - `ANABIX_GROUP_IDS` - ID skupin v Anabixu (volitelné, oddělené čárkou)
+2. Vyplňte konfiguraci — minimálně:
+   - `ANABIX_USERNAME`, `ANABIX_TOKEN`, `ANABIX_API_URL`
+   - `ECOMAIL_API_KEY`, `ECOMAIL_LIST_ID`
 
-## Použití
+3. Spusťte sync:
+   ```bash
+   php contacts-anabix-to-ecomail.php
+   ```
 
-### CLI sync (cron)
-
-```bash
-php sync.php
+Pro pravidelný sync přidejte do cronu:
 ```
-
-Výstup je JSON report:
-```json
-{
-    "status": "ok",
-    "created": 5,
-    "updated": 2,
-    "skipped": 10,
-    "failed": 0,
-    "errors": []
-}
+*/15 * * * * cd /path/to/project && php contacts-anabix-to-ecomail.php >> /dev/null 2>&1
 ```
-
-Pro pravidelné spouštění přidejte do cronu:
-```
-*/15 * * * * cd /path/to/project && php sync.php >> /dev/null 2>&1
-```
-
-### Webhook
-
-Nastavte URL `https://your-server.com/webhook.php` v Ecomailu:
-- Jděte do nastavení seznamu v Ecomailu
-- Na konci stránky nastavte webhook URL
-- Ecomail pošle POST request při každém novém odběrateli
 
 ## Struktura
 
 ```
-.
+├── contacts-anabix-to-ecomail.php   # Hlavní sync kontaktů
+├── activities-ecomail-to-anabix.php # Sync email aktivit
+├── sync-sheets.php                  # Google Sheets → Anabix
 ├── src/
-│   ├── EcomailClient.php    # Klient pro Ecomail API
-│   ├── AnabixClient.php     # Klient pro Anabix API
-│   ├── Transformer.php      # Mapování polí Ecomail → Anabix
-│   ├── SyncState.php        # Tracking synchronizovaných kontaktů
-│   ├── Logger.php           # Logování do souborů
-│   └── env.php              # Načítání .env konfigurace
+│   ├── AnabixClient.php       # Anabix API (kontakty, seznamy, organizace, aktivity)
+│   ├── EcomailClient.php      # Ecomail API (subscribe-bulk, kampaně, email-log)
+│   ├── Transformer.php        # Mapování Anabix → Ecomail (pretitle, custom fields, tagy)
+│   ├── SyncState.php          # Delta sync state (timestamp + lookback)
+│   ├── GoogleSheetsClient.php # Čtení veřejných Google tabulek
+│   ├── Logger.php             # Logování do souborů
+│   └── env.php                # .env loader
 ├── storage/
-│   ├── logs/                # Logy synchronizace
-│   └── state/               # Stav synchronizace (JSON)
-├── sync.php                 # CLI skript pro sync
-├── webhook.php              # Webhook endpoint
-├── .env.example             # Vzorová konfigurace
-└── README.md
+│   ├── logs/                  # Denní logy
+│   └── state/                 # Sync state, org cache
+├── .env.example               # Vzorová konfigurace
+└── anabix_api_manual-2025.pdf # Anabix API manuál
 ```
+
+## Mapování polí (contacts-anabix-to-ecomail)
+
+| Ecomail pole | Anabix zdroj |
+|-------------|-------------|
+| name | firstName |
+| surname | lastName |
+| email | email |
+| phone | phoneNumber |
+| gender | sex |
+| pretitle | title (extrakce před firstName) |
+| surtitle | title (extrakce za lastName) |
+| company | [organizations] title |
+| street | [organizations] billingStreet |
+| city | [organizations] billingCity |
+| zip | [organizations] billingCode |
+| country | [organizations] billingCountry |
+| birthday | idCustomField=5 |
+| tags | [lists] title |
+| `*\|vip\|*` | vip (0/1) |
+| `*\|primaryContact\|*` | primaryContact (0/1) |
+| `*\|projectManager\|*` | idOwner (přes ANABIX_OWNER_* mapu) |
+| `*\|prvniObchod\|*` | idCustomField=10 |
+| `*\|anabixId\|*` | idContact |
 
 ## API Reference
 
-### Ecomail
-- Docs: https://ecomailczv2.docs.apiary.io/
-- Auth: Header `key: API_KEY`
-- Base URL: `https://api2.ecomail.cz`
-
 ### Anabix
-- Docs: https://www.anabix.cz/category/napojene-systemy/api/
 - Auth: `username` + `token` v těle requestu
-- Format: JSON POST na `https://FIRMA.anabix.cz/api`
+- Format: POST multipart/form-data s `json` polem
+- URL: `https://FIRMA.anabix.cz/api`
 
-## Fáze 2 (plánováno)
-
-- Sledování aktivit (otevřené emaily, kliknuté linky)
-- Zápis aktivit do Anabixu (endpoint `activities.create`)
-- Webhook z Ecomailu pro campaign aktivity
+### Ecomail
+- Docs: https://docs.ecomail.cz/
+- Auth: Header `key: API_KEY`
+- Base URL: `https://api2.ecomailapp.cz`

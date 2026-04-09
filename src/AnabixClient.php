@@ -2,13 +2,19 @@
 
 /**
  * Client for Anabix CRM API.
- * Creates/updates contacts and manages group assignments.
  *
  * API: POST to https://{ACCOUNT}.anabix.cz/api
  * Auth: username + token in request body
- * Format: JSON with requestType, requestMethod, data
+ * Format: multipart/form-data with 'json' field containing JSON payload
  *
- * Reference: https://github.com/rotten77/anabix-api
+ * Supports:
+ *  - contacts: getAll (paginated, delta), get (detail)
+ *  - lists: getAll, getMembers
+ *  - organizations: get (single + parallel bulk via curl_multi)
+ *  - activities: create
+ *
+ * Retry: up to 3 attempts with exponential backoff on transient errors
+ * (5xx, 429, 408, cURL failures).
  */
 class AnabixClient
 {
@@ -16,6 +22,9 @@ class AnabixClient
     private string $token;
     private string $apiUrl;
     private Logger $logger;
+
+    private const MAX_RETRIES = 3;
+    private const RETRY_BASE_DELAY = 2; // seconds — exponential: 2s, 4s, 8s
 
     public function __construct(string $user, string $token, string $apiUrl, Logger $logger)
     {
@@ -25,10 +34,177 @@ class AnabixClient
         $this->logger = $logger;
     }
 
+    // ── Contacts ──────────────────────────────────────────────────────
+
+    /**
+     * Fetch contacts from Anabix, optionally filtered by changedSince.
+     *
+     * @param string|null $changedSince  ISO 8601 or Y-m-d H:i:s — only contacts changed after this time
+     * @return array  Flat list of contact arrays
+     */
+    /**
+     * Fetch contacts page by page as a Generator to avoid loading all into memory.
+     *
+     * Yields arrays of contacts (one array per page).
+     *
+     * @param string|null $changedSince  ISO 8601 or Y-m-d H:i:s
+     * @return \Generator<int, array[], void, void>  Yields [contact, contact, ...] per page
+     */
+    public function getContactsPaginated(?string $changedSince = null, bool $fullInfo = false): \Generator
+    {
+        // Smaller page size when fullInfo is enabled — Anabix responses with
+        // fullInfo can be 10-30 MB per 100 contacts, causing server-side timeouts
+        // at higher offsets. 50 contacts keeps responses under ~15 MB.
+        $limit = $fullInfo ? 50 : 100;
+        $offset = 0;
+        $page = 0;
+        $totalFetched = 0;
+        $seenIds = [];
+
+        while (true) {
+            $page++;
+            $data = ['limit' => $limit, 'offset' => $offset];
+            if ($changedSince !== null) {
+                $data['changedSince'] = $changedSince;
+            }
+            if ($fullInfo) {
+                $data['fullInfo'] = 1;
+            }
+
+            // After first successful page, use only 1 retry — Anabix returns
+            // HTTP 500 when offset exceeds total contacts, so retrying wastes time.
+            $retries = $totalFetched > 0 ? 1 : self::MAX_RETRIES;
+            $this->logger->info("Requesting contacts page {$page}", ['offset' => $offset, 'limit' => $limit]);
+            $response = $this->request('contacts', 'getAll', $data, $retries);
+
+            if ($response === null) {
+                if ($totalFetched > 0 && $fullInfo && $limit > 5) {
+                    // Anabix API may return HTTP 500 for large fullInfo responses
+                    // at high offsets. Retry with progressively smaller page sizes.
+                    $smallerLimits = array_filter([25, 10, 5], fn($l) => $l < $limit);
+                    $recovered = false;
+                    foreach ($smallerLimits as $smallerLimit) {
+                        $this->logger->info("Retrying offset {$offset} with smaller page size", [
+                            'original_limit' => $limit,
+                            'new_limit' => $smallerLimit,
+                        ]);
+                        $retryData = $data;
+                        $retryData['limit'] = $smallerLimit;
+                        $retryResponse = $this->request('contacts', 'getAll', $retryData, 1);
+                        if ($retryResponse !== null) {
+                            $retryContacts = $this->extractList($retryResponse);
+                            if (!empty($retryContacts)) {
+                                // Success! Switch to smaller limit for remaining pages
+                                $limit = $smallerLimit;
+                                $response = $retryResponse;
+                                $recovered = true;
+                                $this->logger->info("Recovered with smaller page size", [
+                                    'limit' => $smallerLimit,
+                                    'contacts' => count($retryContacts),
+                                ]);
+                                break;
+                            }
+                        }
+                    }
+                    if (!$recovered) {
+                        $this->logger->warning("Failed to fetch contacts at offset {$offset} even with smaller pages — treating as end of data", [
+                            'offset' => $offset,
+                            'total_fetched' => $totalFetched,
+                        ]);
+                        break;
+                    }
+                } elseif ($totalFetched > 0) {
+                    $this->logger->warning("Failed to fetch contacts at offset {$offset}, but already have {$totalFetched} contacts — treating as end of data", [
+                        'offset' => $offset,
+                        'limit' => $limit,
+                        'total_fetched' => $totalFetched,
+                    ]);
+                    break;
+                } else {
+                    $this->logger->error("Failed to fetch contacts on first page", ['offset' => $offset, 'limit' => $limit]);
+                    break;
+                }
+            }
+
+            $contacts = $this->extractList($response);
+
+            if (empty($contacts)) {
+                $this->logger->info("No more contacts returned", ['offset' => $offset]);
+                break;
+            }
+
+            // Detect duplicates as a safety check
+            $pageIds = [];
+            foreach ($contacts as $c) {
+                $id = $c['idContact'] ?? $c['id'] ?? null;
+                if ($id !== null) {
+                    $pageIds[] = (int) $id;
+                }
+            }
+
+            if (!empty($pageIds)) {
+                $newIds = array_diff($pageIds, array_keys($seenIds));
+                foreach ($pageIds as $id) {
+                    $seenIds[$id] = true;
+                }
+                if (empty($newIds)) {
+                    $this->logger->info("Pagination loop detected, stopping", [
+                        'offset' => $offset,
+                        'total_unique' => count($seenIds),
+                    ]);
+                    break;
+                }
+            }
+
+            $totalFetched += count($contacts);
+
+            $this->logger->info("Fetched contacts", [
+                'page' => $page,
+                'offset' => $offset,
+                'count' => count($contacts),
+                'total' => $totalFetched,
+                'unique_ids' => count($seenIds),
+            ]);
+
+            yield $contacts;
+
+            // If we got fewer than the limit, we've reached the end
+            if (count($contacts) < $limit) {
+                $this->logger->info("Last page reached (partial page)", [
+                    'offset' => $offset,
+                    'count' => count($contacts),
+                    'total' => $totalFetched,
+                ]);
+                break;
+            }
+
+            $offset += $limit;
+
+            // Rate limiting — longer pause to avoid overloading Anabix
+            usleep(500000);
+        }
+    }
+
+    /**
+     * Fetch all contacts into memory (legacy convenience wrapper).
+     *
+     * WARNING: For large datasets, use getContactsPaginated() instead.
+     */
+    public function getContacts(?string $changedSince = null): array
+    {
+        $all = [];
+        foreach ($this->getContactsPaginated($changedSince) as $page) {
+            foreach ($page as $contact) {
+                $all[] = $contact;
+            }
+        }
+        return $all;
+    }
+
     /**
      * Search for a contact by email.
      *
-     * @return array|null Contact data or null if not found
+     * Used by sync-sheets.php for Google Sheets → Anabix activity sync.
      */
     public function findContactByEmail(string $email): ?array
     {
@@ -40,12 +216,16 @@ class AnabixClient
             return null;
         }
 
-        // Response may contain array of contacts or single contact
-        $contacts = $response['data'] ?? $response;
+        $contacts = $this->extractList($response);
 
-        if (is_array($contacts) && !empty($contacts)) {
-            // Return first matching contact
-            return is_array(reset($contacts)) ? reset($contacts) : $contacts;
+        if (!empty($contacts)) {
+            return reset($contacts);
+        }
+
+        // Fallback: single contact might be directly in 'data'
+        $data = $response['data'] ?? null;
+        if (is_array($data) && (isset($data['idContact']) || isset($data['email']))) {
+            return $data;
         }
 
         return null;
@@ -54,61 +234,129 @@ class AnabixClient
     /**
      * Create a new contact in Anabix.
      *
-     * @param array $contactData Fields: firstName, lastName, email, phone, etc.
-     * @return array|null Created contact data or null on failure
+     * @param array $data  Contact fields: firstName, lastName, email, phoneNumber, shippingCity, etc.
+     * @return array|null  Created contact data or null on failure
      */
-    public function createContact(array $contactData): ?array
+    public function createContact(array $data): ?array
     {
-        $this->logger->info("Creating Anabix contact", ['email' => $contactData['email'] ?? 'unknown']);
-
-        $response = $this->request('contacts', 'create', $contactData);
+        $response = $this->request('contacts', 'create', $data);
 
         if ($response === null) {
-            $this->logger->error("Failed to create Anabix contact", ['data' => $contactData]);
+            $this->logger->error("Failed to create contact", ['data' => $data]);
             return null;
         }
 
-        return $response;
+        return $response['data'] ?? $response;
     }
 
     /**
-     * Update an existing contact.
+     * Add a contact to one or more lists in Anabix.
      *
-     * @param int $contactId The Anabix contact ID
-     * @param array $contactData Fields to update
-     * @return array|null Updated contact data or null on failure
-     */
-    public function updateContact(int $contactId, array $contactData): ?array
-    {
-        $contactData['id'] = $contactId;
-
-        $this->logger->info("Updating Anabix contact", ['id' => $contactId]);
-
-        $response = $this->request('contacts', 'update', $contactData);
-
-        if ($response === null) {
-            $this->logger->error("Failed to update Anabix contact", ['id' => $contactId]);
-            return null;
-        }
-
-        return $response;
-    }
-
-    /**
-     * Add a contact to a group.
+     * Uses contacts.manageLists API:
+     *   idContact, addTo: [listId1, listId2, ...]
      *
-     * @param int $contactId The Anabix contact ID
-     * @param int $groupId The Anabix group ID
+     * @param int   $contactId  Contact ID
+     * @param int[] $listIds    List IDs to add the contact to
+     * @return bool  True if successful
      */
-    public function addContactToGroup(int $contactId, int $groupId): ?array
+    public function addContactToLists(int $contactId, array $listIds): bool
     {
-        $this->logger->info("Adding contact to group", ['contact' => $contactId, 'group' => $groupId]);
-
-        return $this->request('contacts', 'addToGroup', [
+        $response = $this->request('contacts', 'manageLists', [
             'idContact' => $contactId,
-            'idGroup' => $groupId,
+            'addTo' => array_values($listIds),
         ]);
+
+        if ($response === null) {
+            $this->logger->error("Failed to add contact to lists", [
+                'contact' => $contactId,
+                'lists' => $listIds,
+            ]);
+            return false;
+        }
+
+        return true;
     }
+
+    // ── Organizations ─────────────────────────────────────────────────
+
+    /**
+     * Fetch multiple organizations in parallel using curl_multi.
+     *
+     * @param int[] $orgIds         Organization IDs to fetch
+     * @param int   $concurrency    Max parallel requests
+     * @return array  Map of orgId => organization data
+     */
+    public function getOrganizationsParallel(array $orgIds, int $concurrency = 20): array
+    {
+        if (empty($orgIds)) {
+            return [];
+        }
+
+        $results = [];
+        $chunks = array_chunk($orgIds, $concurrency);
+
+        foreach ($chunks as $chunk) {
+            $multiHandle = curl_multi_init();
+            $handles = [];
+
+            foreach ($chunk as $orgId) {
+                $payload = json_encode([
+                    'username' => $this->user,
+                    'token' => $this->token,
+                    'requestType' => 'organizations',
+                    'requestMethod' => 'get',
+                    'data' => ['idOrganization' => $orgId],
+                ], JSON_UNESCAPED_UNICODE);
+
+                $ch = curl_init();
+                curl_setopt_array($ch, [
+                    CURLOPT_URL => $this->apiUrl,
+                    CURLOPT_POST => true,
+                    CURLOPT_POSTFIELDS => ['json' => $payload],
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_TIMEOUT => 30,
+                    CURLOPT_CONNECTTIMEOUT => 10,
+                    CURLOPT_NOSIGNAL => 1,
+                ]);
+
+                curl_multi_add_handle($multiHandle, $ch);
+                $handles[$orgId] = $ch;
+            }
+
+            // Execute all requests
+            do {
+                $status = curl_multi_exec($multiHandle, $active);
+                curl_multi_select($multiHandle);
+            } while ($active > 0 && $status === CURLM_OK);
+
+            // Collect results
+            foreach ($handles as $orgId => $ch) {
+                $body = curl_multi_getcontent($ch);
+                $response = json_decode($body, true);
+
+                if ($response !== null && empty($response['error'])) {
+                    $org = $response['data'] ?? $response;
+                    if (is_array($org) && !empty($org)) {
+                        $results[$orgId] = $org;
+                    }
+                }
+
+                curl_multi_remove_handle($multiHandle, $ch);
+                curl_close($ch);
+            }
+
+            curl_multi_close($multiHandle);
+
+            $this->logger->info("Fetched organizations batch", [
+                'requested' => count($chunk),
+                'received' => count(array_intersect_key($results, array_flip($chunk))),
+            ]);
+        }
+
+        return $results;
+    }
+
+    // ── Activities ────────────────────────────────────────────────────
 
     /**
      * Create an activity on a contact.
@@ -121,6 +369,22 @@ class AnabixClient
      */
     public function createActivity(int $contactId, string $title, string $body, string $type = 'note', ?int $ownerId = null): ?array
     {
+     * Used by sync-sheets.php and activities-ecomail-to-anabix.php.
+     */
+    public function createActivity(
+        int $contactId,
+        string $title,
+        string $body,
+        string $type = 'note',
+        ?string $timestamp = null,
+        ?int $idUser = null
+    ): ?array {
+        if ($timestamp !== null) {
+            $unixTimestamp = is_numeric($timestamp) ? (int) $timestamp : strtotime($timestamp);
+        } else {
+            $unixTimestamp = time();
+        }
+
         $data = [
             'idContact' => $contactId,
             'title' => $title,
@@ -134,14 +398,75 @@ class AnabixClient
         }
 
         return $this->request('activities', 'create', $data);
+            'timestamp' => $unixTimestamp,
+        ];
+
+        if ($idUser !== null) {
+            $data['idUser'] = $idUser;
+        }
+
+        $this->logger->info("Creating activity", [
+            'contact' => $contactId,
+            'type' => $type,
+            'title' => $title,
+        ]);
+
+        return $this->request('activities', 'create', $data);
+    }
+
+    // ── Internal ──────────────────────────────────────────────────────
+
+    /**
+     * Extract a flat list of items from an Anabix API response.
+     *
+     * Anabix responses come in many shapes:
+     *   {"data": {"123": {...}, "456": {...}}}
+     *   {"data": [{...}, {...}]}
+     *   {"123": {...}, "456": {...}}  (items at top level)
+     */
+    private function extractList(array $response): array
+    {
+        // Try 'data' key first
+        $data = $response['data'] ?? null;
+
+        if (is_array($data) && !empty($data)) {
+            $first = reset($data);
+            if (is_array($first)) {
+                return array_values($data);
+            }
+            // Single item that looks like a record
+            if (isset($data['idContact']) || isset($data['idList']) || isset($data['idOrganization'])) {
+                return [$data];
+            }
+        }
+
+        // Try common alternative keys
+        foreach (['contacts', 'items', 'records', 'lists', 'members'] as $key) {
+            if (isset($response[$key]) && is_array($response[$key])) {
+                return array_values($response[$key]);
+            }
+        }
+
+        // Try top-level (minus metadata keys)
+        $filtered = array_filter($response, function ($value, $key) {
+            return !in_array($key, ['error', 'message', 'data', 'status', 'page', 'pages'], true)
+                && is_array($value);
+        }, ARRAY_FILTER_USE_BOTH);
+
+        if (!empty($filtered)) {
+            return array_values($filtered);
+        }
+
+        return [];
     }
 
     /**
-     * Send a request to the Anabix API.
+     * Send a request to the Anabix API with retry on transient errors.
      */
-    private function request(string $requestType, string $requestMethod, array $data = []): ?array
+    private function request(string $requestType, string $requestMethod, array $data = [], ?int $maxRetries = null): ?array
     {
-        // Anabix API expects multipart/form-data with a 'json' field
+        $maxRetries = $maxRetries ?? self::MAX_RETRIES;
+
         $payload = json_encode([
             'username' => $this->user,
             'token' => $this->token,
@@ -150,51 +475,108 @@ class AnabixClient
             'data' => $data,
         ], JSON_UNESCAPED_UNICODE);
 
-        $ch = curl_init();
-        curl_setopt_array($ch, [
-            CURLOPT_URL => $this->apiUrl,
-            CURLOPT_POST => true,
-            CURLOPT_POSTFIELDS => ['json' => $payload],
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT => 30,
-            CURLOPT_CONNECTTIMEOUT => 10,
-        ]);
-
-        $responseBody = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $error = curl_error($ch);
-        curl_close($ch);
-
-        if ($error) {
-            $this->logger->error("Anabix API curl error", [
-                'error' => $error,
+        for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
+            $this->logger->debug("API request start", [
                 'type' => $requestType,
                 'method' => $requestMethod,
+                'attempt' => "{$attempt}/{$maxRetries}",
+                'data_keys' => array_keys($data),
             ]);
-            return null;
-        }
 
-        $response = json_decode($responseBody, true);
+            $ch = curl_init();
+            curl_setopt_array($ch, [
+                CURLOPT_URL => $this->apiUrl,
+                CURLOPT_POST => true,
+                CURLOPT_POSTFIELDS => ['json' => $payload],
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT => 30,
+                CURLOPT_CONNECTTIMEOUT => 10,
+                CURLOPT_NOSIGNAL => 1, // Required for CURLOPT_TIMEOUT to work reliably
+            ]);
 
-        if ($response === null) {
-            $this->logger->error("Anabix API invalid JSON response", [
+            $startTime = microtime(true);
+            $responseBody = curl_exec($ch);
+            $elapsed = round(microtime(true) - $startTime, 2);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $error = curl_error($ch);
+            curl_close($ch);
+
+            $this->logger->debug("API request done", [
+                'type' => $requestType,
+                'method' => $requestMethod,
                 'http_code' => $httpCode,
-                'response' => $responseBody,
+                'elapsed' => "{$elapsed}s",
+                'response_size' => strlen($responseBody ?: ''),
+                'error' => $error ?: null,
             ]);
-            return null;
+
+            // cURL transport error
+            if ($error) {
+                $this->logger->warning("Anabix API cURL error (attempt {$attempt}/{$maxRetries})", [
+                    'error' => $error,
+                    'type' => $requestType,
+                    'method' => $requestMethod,
+                ]);
+                if ($attempt < $maxRetries) {
+                    $delay = (int) pow(self::RETRY_BASE_DELAY, $attempt); // 2s, 4s, 8s
+                    sleep($delay);
+                    continue;
+                }
+                $this->logger->error("Anabix API cURL error after all retries", ['error' => $error]);
+                return null;
+            }
+
+            // Transient HTTP errors — retry
+            if (in_array($httpCode, [408, 429, 500, 502, 503, 504], true)) {
+                $this->logger->warning("Anabix API transient HTTP error (attempt {$attempt}/{$maxRetries})", [
+                    'http_code' => $httpCode,
+                    'type' => $requestType,
+                    'method' => $requestMethod,
+                ]);
+                if ($attempt < $maxRetries) {
+                    $delay = (int) pow(self::RETRY_BASE_DELAY, $attempt); // 2s, 4s, 8s
+                    sleep($delay);
+                    continue;
+                }
+                $this->logger->error("Anabix API HTTP error after all retries", ['http_code' => $httpCode]);
+                return null;
+            }
+
+            // Non-transient HTTP error
+            if ($httpCode < 200 || $httpCode >= 300) {
+                $this->logger->error("Anabix API HTTP error", [
+                    'http_code' => $httpCode,
+                    'response' => mb_substr($responseBody, 0, 500),
+                ]);
+                return null;
+            }
+
+            // Parse JSON
+            $response = json_decode($responseBody, true);
+            if ($response === null) {
+                $this->logger->error("Anabix API invalid JSON", [
+                    'response' => mb_substr($responseBody, 0, 500),
+                ]);
+                return null;
+            }
+
+            // API-level error
+            $isError = (isset($response['error']) && $response['error'])
+                || (isset($response['status']) && strtoupper($response['status']) === 'ERROR');
+
+            if ($isError) {
+                $errorMessage = $response['message'] ?? $response['data'] ?? 'Unknown error';
+                $this->logger->error("Anabix API error", [
+                    'message' => $errorMessage,
+                    'type' => $requestType,
+                    'method' => $requestMethod,
+                ]);
+                return null;
+            }
+
+            return $response;
         }
 
-        // Check for API-level error in the response
-        if (isset($response['error']) && $response['error']) {
-            $this->logger->error("Anabix API returned error", [
-                'error' => $response['error'],
-                'message' => $response['message'] ?? '',
-                'type' => $requestType,
-                'method' => $requestMethod,
-            ]);
-            return null;
-        }
-
-        return $response;
+        return null;
     }
 }
