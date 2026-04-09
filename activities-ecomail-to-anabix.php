@@ -183,20 +183,23 @@ try {
 
         output("Campaign #{$campaignId}: {$subject}");
 
-        // Fetch subscriber events for this campaign
-        $events = $ecomail->getCampaignEvents((int) $campaignId);
+        // Fetch campaign log — individual events per subscriber
+        $events = $ecomail->getCampaignLog((int) $campaignId);
 
         if (empty($events)) {
-            output("  No events.");
+            output("  No events in campaign log.");
             $report['campaigns_processed']++;
             continue;
         }
 
         output("  Events: " . count($events));
 
+        // Cache anabixId lookups to avoid repeated API calls for same email
+        $anabixIdCache = [];
+
         foreach ($events as $event) {
             $email = $event['email'] ?? '';
-            $eventType = $event['event'] ?? $event['type'] ?? '';
+            $eventType = $event['event'] ?? '';
 
             if ($eventType === '' || $email === '') {
                 continue;
@@ -208,19 +211,16 @@ try {
                 continue;
             }
 
-            // Get anabixId from subscriber's custom fields
-            $anabixId = $event['custom_fields']['anabixId']
-                ?? $event['merge_fields']['anabixId']
-                ?? $event['anabixId']
-                ?? null;
-
-            // If not in event data, try to fetch subscriber to get anabixId
-            if ($anabixId === null) {
+            // Get anabixId — use cache or fetch from Ecomail subscriber
+            if (!array_key_exists($email, $anabixIdCache)) {
                 $subscriber = $ecomail->getSubscriber($email);
-                $anabixId = $subscriber['custom_fields']['anabixId']
+                $anabixIdCache[$email] = $subscriber['custom_fields']['anabixId']
                     ?? $subscriber['merge_fields']['anabixId']
                     ?? null;
+                usleep(200000);
             }
+
+            $anabixId = $anabixIdCache[$email];
 
             if ($anabixId === null || (int) $anabixId === 0) {
                 $report['skipped_no_anabix_id']++;
@@ -243,7 +243,7 @@ try {
             }
 
             $activityTitle = $title;
-            $timestamp = $sentAt ?? date('Y-m-d H:i:s');
+            $timestamp = $event['occured_at'] ?? $sentAt ?? date('Y-m-d H:i:s');
 
             if ($dryRun) {
                 output("  [DRY] {$email} (anabixId={$anabixId}): {$eventType} → {$activityType}");

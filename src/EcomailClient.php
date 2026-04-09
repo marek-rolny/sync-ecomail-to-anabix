@@ -257,15 +257,174 @@ class EcomailClient
     }
 
     /**
-     * Get subscriber events for a campaign (sends, opens, clicks, bounces, etc.).
+     * Get aggregate stats for a campaign (total sends, opens, clicks, etc.).
      *
-     * @return array[]  List of event arrays
+     * Uses GET /campaigns/{campaignId}/stats
+     *
+     * @return array|null  Stats array or null on failure
+     */
+    public function getCampaignStats(int $campaignId): ?array
+    {
+        return $this->get("/campaigns/{$campaignId}/stats");
+    }
+
+    /**
+     * Get per-subscriber stats for a campaign.
+     *
+     * Uses GET /campaigns/{campaignId}/stats-detail
+     * Response: { "subscribers": { "email@x.com": { "open": 2, "send": 1, ... } }, "total": N, "per_page": 100 }
+     *
+     * @return array  Map of email => { open: int, send: int, click: int, ... }
+     */
+    public function getCampaignStatsDetail(int $campaignId, array $params = []): array
+    {
+        $allSubscribers = [];
+        $page = 1;
+
+        while (true) {
+            $queryParams = array_merge($params, ['page' => $page, 'per_page' => 100]);
+            $response = $this->get("/campaigns/{$campaignId}/stats-detail", $queryParams);
+
+            if ($response === null) {
+                break;
+            }
+
+            $subscribers = $response['subscribers'] ?? [];
+
+            $this->logger->debug("getCampaignStatsDetail response", [
+                'campaignId' => $campaignId,
+                'page' => $page,
+                'subscriber_count' => count($subscribers),
+                'total' => $response['total'] ?? null,
+            ]);
+
+            if (empty($subscribers) || !is_array($subscribers)) {
+                break;
+            }
+
+            foreach ($subscribers as $email => $stats) {
+                $allSubscribers[$email] = $stats;
+            }
+
+            // Check pagination
+            $nextPageUrl = $response['next_page_url'] ?? null;
+            $perPage = $response['per_page'] ?? 100;
+
+            if ($nextPageUrl === null || count($subscribers) < $perPage) {
+                break;
+            }
+
+            $page++;
+            usleep(300000);
+        }
+
+        return $allSubscribers;
+    }
+
+    /**
+     * Get campaign log — individual events (sends, opens, clicks, bounces, etc.).
+     *
+     * Uses GET /campaigns/log with campaign_id filter.
+     * Response: { "campaign_log": [ { "id", "campaign_id", "event", "email", ... }, ... ] }
+     *
+     * Possible event types: send, open, click, hard_bounce, soft_bounce,
+     *                       out_of_band, unsub, spam, spam_complaint.
+     *
+     * @param int      $campaignId  Campaign to fetch events for
+     * @param string[] $events      Event types to filter (empty = all)
+     * @return array[]  List of event records
+     */
+    public function getCampaignLog(int $campaignId, array $events = []): array
+    {
+        $allEvents = [];
+        $page = 1;
+
+        while (true) {
+            $queryParams = [
+                'campaign_id' => $campaignId,
+                'per_page' => 100,
+                'page' => $page,
+                'sort_by' => 'occured_at',
+                'sort_dir' => 'desc',
+            ];
+
+            if (!empty($events)) {
+                $queryParams['events[]'] = implode(',', $events);
+            }
+
+            $response = $this->get('/campaigns/log', $queryParams);
+
+            if ($response === null) {
+                break;
+            }
+
+            $logs = $response['campaign_log'] ?? $response['data'] ?? [];
+
+            $this->logger->debug("getCampaignLog response", [
+                'campaignId' => $campaignId,
+                'page' => $page,
+                'log_count' => count($logs),
+                'response_keys' => array_keys($response),
+            ]);
+
+            if (empty($logs) || !is_array($logs)) {
+                break;
+            }
+
+            foreach ($logs as $log) {
+                if (is_array($log)) {
+                    $allEvents[] = $log;
+                }
+            }
+
+            if (count($logs) < 100) {
+                break;
+            }
+
+            $page++;
+            usleep(300000);
+        }
+
+        return $allEvents;
+    }
+
+    /**
+     * Get subscriber events for a campaign (backward-compatible wrapper).
+     *
+     * Tries campaign log first (individual events), falls back to stats-detail.
+     *
+     * @return array[]  List of event arrays with 'email' and 'event' keys
      */
     public function getCampaignEvents(int $campaignId): array
     {
-        $response = $this->get("/campaigns/{$campaignId}/response");
+        // Primary: campaign log — gives individual events
+        $events = $this->getCampaignLog($campaignId);
 
-        return $response['data'] ?? $response ?? [];
+        if (!empty($events)) {
+            return $events;
+        }
+
+        // Fallback: stats-detail — convert per-subscriber counts to events
+        $subscribers = $this->getCampaignStatsDetail($campaignId);
+
+        if (empty($subscribers)) {
+            return [];
+        }
+
+        $events = [];
+        foreach ($subscribers as $email => $stats) {
+            foreach ($stats as $eventType => $count) {
+                if (is_int($count) && $count > 0) {
+                    $events[] = [
+                        'email' => $email,
+                        'event' => $eventType,
+                        'count' => $count,
+                    ];
+                }
+            }
+        }
+
+        return $events;
     }
 
     /**
@@ -281,6 +440,160 @@ class EcomailClient
         }
 
         return $response['subscriber'] ?? $response['data'] ?? $response;
+    }
+
+    /**
+     * Get all subscribers from the configured list.
+     *
+     * Uses GET /lists/{listId}/subscribers with pagination.
+     *
+     * @return array[]  List of subscriber arrays
+     */
+    public function getSubscribers(): array
+    {
+        $all = [];
+        $page = 1;
+
+        while (true) {
+            $response = $this->get("/lists/{$this->listId}/subscribers", [
+                'per_page' => 100,
+                'page' => $page,
+            ]);
+
+            if ($response === null) {
+                break;
+            }
+
+            $subscribers = $response['subscriber'] ?? $response['subscribers'] ?? $response['data'] ?? [];
+
+            $this->logger->debug("getSubscribers page", [
+                'page' => $page,
+                'count' => count($subscribers),
+                'response_keys' => array_keys($response),
+            ]);
+
+            if (empty($subscribers) || !is_array($subscribers)) {
+                break;
+            }
+
+            foreach ($subscribers as $sub) {
+                if (is_array($sub)) {
+                    $all[] = $sub;
+                }
+            }
+
+            if (count($subscribers) < 100) {
+                break;
+            }
+
+            $page++;
+            usleep(300000);
+        }
+
+        return $all;
+    }
+
+    // ── Subscriber logs (for activity sync) ──────────────────────────
+
+    /**
+     * Get email (campaign) log for a subscriber.
+     *
+     * Uses GET /subscribers/{email}/email-log
+     * Returns campaign events: send, open, click, hard_bounce, soft_bounce,
+     *                          out_of_band, unsub, spam, spam_complaint.
+     *
+     * @return array[]  List of event records
+     */
+    public function getSubscriberEmailLog(string $email, array $params = []): array
+    {
+        $encoded = urlencode($email);
+        $allEvents = [];
+        $page = 1;
+
+        while (true) {
+            $queryParams = array_merge($params, [
+                'per_page' => 100,
+                'page' => $page,
+            ]);
+
+            $response = $this->get("/subscribers/{$encoded}/email-log", $queryParams);
+
+            if ($response === null) {
+                break;
+            }
+
+            $logs = $response['email_log'] ?? $response['campaign_log'] ?? $response['data'] ?? [];
+
+            if (empty($logs) || !is_array($logs)) {
+                break;
+            }
+
+            foreach ($logs as $log) {
+                if (is_array($log)) {
+                    $allEvents[] = $log;
+                }
+            }
+
+            if (count($logs) < 100) {
+                break;
+            }
+
+            $page++;
+            usleep(200000);
+        }
+
+        return $allEvents;
+    }
+
+    /**
+     * Get automation (pipeline) log for a subscriber.
+     *
+     * Uses GET /subscribers/{email}/automation-log
+     * Returns automation events sorted by timestamp descending.
+     *
+     * @return array[]  List of event records
+     */
+    public function getSubscriberAutomationLog(string $email, array $params = []): array
+    {
+        $encoded = urlencode($email);
+        $allEvents = [];
+        $page = 1;
+
+        while (true) {
+            $queryParams = array_merge($params, [
+                'per_page' => 100,
+                'page' => $page,
+                'sort_by' => 'timestamp',
+                'sort_dir' => 'desc',
+            ]);
+
+            $response = $this->get("/subscribers/{$encoded}/automation-log", $queryParams);
+
+            if ($response === null) {
+                break;
+            }
+
+            $logs = $response['automation_log'] ?? $response['pipeline_log'] ?? $response['data'] ?? [];
+
+            if (empty($logs) || !is_array($logs)) {
+                break;
+            }
+
+            foreach ($logs as $log) {
+                if (is_array($log)) {
+                    $allEvents[] = $log;
+                }
+            }
+
+            if (count($logs) < 100) {
+                break;
+            }
+
+            $page++;
+            usleep(200000);
+        }
+
+        return $allEvents;
     }
 
     // ── HTTP methods ──────────────────────────────────────────────────
