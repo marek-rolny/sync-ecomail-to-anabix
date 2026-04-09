@@ -222,7 +222,6 @@ $report = [
     'subscribers_total' => 0,
     'subscribers_with_anabix_id' => 0,
     'subscribers_skipped' => 0,
-    'email_log_events' => 0,
     'automation_log_events' => 0,
     'activities_created' => 0,
     'skipped_duplicate' => 0,
@@ -287,97 +286,15 @@ try {
         $report['subscribers_with_anabix_id']++;
 
         $subNum = $subIndex + 1;
-        $isDebug = $subIndex < 3 || $testEmail !== null; // debug first 3 or test mode
+        output("  [{$subNum}/{$report['subscribers_total']}] {$email} (anabixId={$anabixId})");
 
-        // ── 2a. Email log (campaign events) ──────────────────────────
+        // NOTE: Campaign email events (open, click, send) are handled by
+        // activities-ecomail-to-anabix.php which iterates campaigns and
+        // uses GET /campaigns/log?campaign_id=X. The per-subscriber
+        // GET /campaigns/log?email=X requires campaign_id and cannot
+        // be used as a standalone subscriber filter.
 
-        $emailLogEvents = $ecomail->getSubscriberEmailLog($email);
-
-        if ($isDebug) {
-            $debugResponse = $ecomail->debugGet('/campaigns/log', ['email' => $email, 'per_page' => 5]);
-            output("  [{$subNum}] {$email} (anabixId={$anabixId})");
-            output("    email-log (via /campaigns/log) HTTP {$debugResponse['_debug_http_code']}:");
-            output("    URL: {$debugResponse['_debug_url']}");
-            output("    Body: " . mb_substr($debugResponse['_debug_body'], 0, 500));
-            output("    email events found: " . count($emailLogEvents));
-        } else {
-            output("  [{$subNum}/{$report['subscribers_total']}] {$email} (anabixId={$anabixId}) — emails: " . count($emailLogEvents));
-        }
-        $report['email_log_events'] += count($emailLogEvents);
-
-        foreach ($emailLogEvents as $event) {
-            $eventType = $event['event'] ?? '';
-            if ($eventType === '') {
-                continue;
-            }
-
-            $activityType = $eventTypeMap[$eventType] ?? null;
-            if ($activityType === null) {
-                $report['skipped_unmapped']++;
-                continue;
-            }
-
-            $deduKey = eventDeduplicationKey($event, 'campaign', $anabixId);
-            if (isset($processedKeys[$deduKey])) {
-                $report['skipped_duplicate']++;
-                continue;
-            }
-
-            // email-log fields: campaign_id, autoresponder_id, mail_name, event, url, occured_at
-            $mailName = $event['mail_name'] ?? '';
-            $campaignId = $event['campaign_id'] ?? '';
-            $autoresponderId = $event['autoresponder_id'] ?? '';
-
-            if ($mailName !== '') {
-                $title = $mailName;
-            } elseif ($autoresponderId !== '') {
-                $title = "Autoresponder #{$autoresponderId}";
-            } elseif ($campaignId !== '') {
-                $title = "Kampaň #{$campaignId}";
-            } else {
-                $title = "Email event";
-            }
-
-            $bodyLines = ["Stav: {$eventType}"];
-            if ($mailName !== '') { $bodyLines[] = "Email: {$mailName}"; }
-            if ($campaignId !== '') { $bodyLines[] = "Kampaň: #{$campaignId}"; }
-            if ($autoresponderId !== '') { $bodyLines[] = "Autoresponder: #{$autoresponderId}"; }
-            $url = $event['url'] ?? '';
-            if ($url !== '') { $bodyLines[] = "URL: {$url}"; }
-            $occuredAt = $event['occured_at'] ?? '';
-            if ($occuredAt !== '') { $bodyLines[] = "Datum: {$occuredAt}"; }
-            $body = implode("\n", $bodyLines);
-
-            $timestamp = $event['occured_at'] ?? null;
-
-            if ($dryRun) {
-                output("    [DRY] campaign {$eventType}: {$title}");
-                $report['activities_created']++;
-                $processedKeys[$deduKey] = true;
-                continue;
-            }
-
-            $result = $anabix->createActivity(
-                $anabixId,
-                $title,
-                $body,
-                $activityType,
-                $timestamp,
-                $activityIdUser
-            );
-
-            if ($result !== null) {
-                $report['activities_created']++;
-                $processedKeys[$deduKey] = true;
-            } else {
-                $report['failed']++;
-                $report['errors'][] = "Failed: {$email} campaign {$eventType}";
-            }
-
-            usleep(200000);
-        }
-
-        // ── 2b. Automation log (pipeline events) ─────────────────────
+        // ── 2a. Automation log (pipeline events) ─────────────────────
 
         $automationLogEvents = $ecomail->getSubscriberAutomationLog($email);
         $report['automation_log_events'] += count($automationLogEvents);
@@ -585,7 +502,6 @@ output("=== Summary ===");
 output("Subscribers total:       {$report['subscribers_total']}");
 output("Subscribers with ID:     {$report['subscribers_with_anabix_id']}");
 output("Subscribers skipped:     {$report['subscribers_skipped']}");
-output("Email log events:        {$report['email_log_events']}");
 output("Automation log events:   {$report['automation_log_events']}");
 output("Tracker events:          " . ($report['tracker_events'] ?? 0));
 output("Activities created:      {$report['activities_created']}");
