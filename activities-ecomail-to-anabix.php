@@ -184,6 +184,11 @@ try {
         output("Campaign #{$campaignId}: {$subject}");
 
         // Fetch campaign log — individual events per subscriber
+        $debugRaw = $ecomail->debugGet('/campaigns/log', ['campaign_id' => $campaignId, 'per_page' => 5]);
+        output("  DEBUG /campaigns/log HTTP {$debugRaw['_debug_http_code']}");
+        output("  DEBUG URL: {$debugRaw['_debug_url']}");
+        output("  DEBUG body: " . mb_substr($debugRaw['_debug_body'], 0, 400));
+
         $events = $ecomail->getCampaignLog((int) $campaignId);
 
         if (empty($events)) {
