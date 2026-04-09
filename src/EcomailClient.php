@@ -597,6 +597,59 @@ class EcomailClient
         return $allEvents;
     }
 
+    /**
+     * Get tracker events for a subscriber (web visits, basket, purchase, etc.).
+     *
+     * Uses GET /subscribers/{email}/events
+     * Response: {"current_page":1,"data":[{"id","email","category","action","label","property","value","timestamp"}],...}
+     *
+     * @return array[]  List of event records
+     */
+    public function getSubscriberEvents(string $email, array $params = []): array
+    {
+        $encoded = urlencode($email);
+        $allEvents = [];
+        $page = 1;
+
+        while (true) {
+            $queryParams = array_merge($params, [
+                'per_page' => 100,
+                'page' => $page,
+            ]);
+
+            $response = $this->get("/subscribers/{$encoded}/events", $queryParams);
+
+            if ($response === null) {
+                break;
+            }
+
+            $events = $response['data'] ?? [];
+
+            if (empty($events) || !is_array($events)) {
+                break;
+            }
+
+            foreach ($events as $event) {
+                if (is_array($event)) {
+                    $allEvents[] = $event;
+                }
+            }
+
+            $lastPage = $response['last_page'] ?? null;
+            if ($lastPage !== null && $page >= $lastPage) {
+                break;
+            }
+            if (count($events) < 100) {
+                break;
+            }
+
+            $page++;
+            usleep(200000);
+        }
+
+        return $allEvents;
+    }
+
     // ── HTTP methods ──────────────────────────────────────────────────
 
     /**

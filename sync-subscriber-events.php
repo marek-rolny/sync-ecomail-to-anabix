@@ -455,6 +455,82 @@ try {
             usleep(200000);
         }
 
+        // ── 2c. Tracker events (web visits, basket, purchase, etc.) ──
+
+        $trackerEvents = $ecomail->getSubscriberEvents($email);
+        $report['tracker_events'] = ($report['tracker_events'] ?? 0) + count($trackerEvents);
+
+        foreach ($trackerEvents as $event) {
+            $action   = $event['action'] ?? '';
+            $category = $event['category'] ?? '';
+            if ($action === '' && $category === '') {
+                continue;
+            }
+
+            $deduKey = md5("tracker|{$anabixId}|" . ($event['id'] ?? '') . "|{$action}|" . ($event['timestamp'] ?? ''));
+            if (isset($processedKeys[$deduKey])) {
+                $report['skipped_duplicate']++;
+                continue;
+            }
+
+            $label = $event['label'] ?? $action;
+            $title = $label !== '' ? $label : "Tracker: {$action}";
+
+            $bodyLines = [];
+            if ($category !== '') { $bodyLines[] = "Kategorie: {$category}"; }
+            if ($action !== '')   { $bodyLines[] = "Akce: {$action}"; }
+            if ($label !== '' && $label !== $action) { $bodyLines[] = "Label: {$label}"; }
+
+            // URL from property or value field
+            $property = $event['property'] ?? '';
+            if ($property !== '') {
+                $bodyLines[] = "URL: {$property}";
+            } else {
+                // Try to extract URL from value JSON
+                $valueRaw = $event['value'] ?? '';
+                if ($valueRaw !== '') {
+                    $valueParsed = json_decode($valueRaw, true);
+                    $url = $valueParsed['url']
+                        ?? $valueParsed['data']['url']
+                        ?? $valueParsed['data']['data']['url']
+                        ?? null;
+                    if ($url !== null) {
+                        $bodyLines[] = "URL: {$url}";
+                    }
+                }
+            }
+
+            $timestamp = $event['timestamp'] ?? null;
+            if ($timestamp !== '') { $bodyLines[] = "Datum: {$timestamp}"; }
+            $body = implode("\n", $bodyLines);
+
+            if ($dryRun) {
+                output("    [DRY] tracker note: {$title}");
+                $report['activities_created']++;
+                $processedKeys[$deduKey] = true;
+                continue;
+            }
+
+            $result = $anabix->createActivity(
+                $anabixId,
+                $title,
+                $body,
+                'note',
+                $timestamp,
+                $activityIdUser
+            );
+
+            if ($result !== null) {
+                $report['activities_created']++;
+                $processedKeys[$deduKey] = true;
+            } else {
+                $report['failed']++;
+                $report['errors'][] = "Failed: {$email} tracker {$action}";
+            }
+
+            usleep(200000);
+        }
+
         // In debug mode (first run / dry-run), stop after 5 subscribers to save time
         if ($dryRun && $testEmail === null && $subIndex >= 4) {
             output("");
@@ -510,6 +586,7 @@ output("Subscribers with ID:     {$report['subscribers_with_anabix_id']}");
 output("Subscribers skipped:     {$report['subscribers_skipped']}");
 output("Email log events:        {$report['email_log_events']}");
 output("Automation log events:   {$report['automation_log_events']}");
+output("Tracker events:          " . ($report['tracker_events'] ?? 0));
 output("Activities created:      {$report['activities_created']}");
 output("Skipped (duplicate):     {$report['skipped_duplicate']}");
 output("Skipped (unmapped):      {$report['skipped_unmapped']}");
