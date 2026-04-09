@@ -473,32 +473,35 @@ try {
                 continue;
             }
 
-            $label = $event['label'] ?? $action;
-            $title = $label !== '' ? $label : "Tracker: {$action}";
-
-            $bodyLines = [];
-            if ($category !== '') { $bodyLines[] = "Kategorie: {$category}"; }
-            if ($action !== '')   { $bodyLines[] = "Akce: {$action}"; }
-            if ($label !== '' && $label !== $action) { $bodyLines[] = "Label: {$label}"; }
-
-            // URL from property or value field
+            // Extract URL from property or value JSON
+            $url = '';
             $property = $event['property'] ?? '';
             if ($property !== '') {
-                $bodyLines[] = "URL: {$property}";
+                $url = $property;
             } else {
-                // Try to extract URL from value JSON
                 $valueRaw = $event['value'] ?? '';
                 if ($valueRaw !== '') {
                     $valueParsed = json_decode($valueRaw, true);
                     $url = $valueParsed['url']
                         ?? $valueParsed['data']['url']
                         ?? $valueParsed['data']['data']['url']
-                        ?? null;
-                    if ($url !== null) {
-                        $bodyLines[] = "URL: {$url}";
-                    }
+                        ?? '';
                 }
             }
+
+            // Title: "Návštěva webu {domain}"
+            $domain = '';
+            if ($url !== '') {
+                $parsed = parse_url($url);
+                $domain = $parsed['host'] ?? '';
+                $domain = preg_replace('/^www\./', '', $domain);
+            }
+            $title = 'Návštěva webu' . ($domain !== '' ? " {$domain}" : '');
+
+            $bodyLines = [];
+            if ($url !== '')      { $bodyLines[] = "URL: {$url}"; }
+            if ($action !== '' && $action !== 'pageview') { $bodyLines[] = "Akce: {$action}"; }
+            if ($category !== '') { $bodyLines[] = "Kategorie: {$category}"; }
 
             $timestamp = $event['timestamp'] ?? null;
             if ($timestamp !== '') { $bodyLines[] = "Datum: {$timestamp}"; }
