@@ -442,6 +442,160 @@ class EcomailClient
         return $response['subscriber'] ?? $response['data'] ?? $response;
     }
 
+    /**
+     * Get all subscribers from the configured list.
+     *
+     * Uses GET /lists/{listId}/subscribers with pagination.
+     *
+     * @return array[]  List of subscriber arrays
+     */
+    public function getSubscribers(): array
+    {
+        $all = [];
+        $page = 1;
+
+        while (true) {
+            $response = $this->get("/lists/{$this->listId}/subscribers", [
+                'per_page' => 100,
+                'page' => $page,
+            ]);
+
+            if ($response === null) {
+                break;
+            }
+
+            $subscribers = $response['subscriber'] ?? $response['subscribers'] ?? $response['data'] ?? [];
+
+            $this->logger->debug("getSubscribers page", [
+                'page' => $page,
+                'count' => count($subscribers),
+                'response_keys' => array_keys($response),
+            ]);
+
+            if (empty($subscribers) || !is_array($subscribers)) {
+                break;
+            }
+
+            foreach ($subscribers as $sub) {
+                if (is_array($sub)) {
+                    $all[] = $sub;
+                }
+            }
+
+            if (count($subscribers) < 100) {
+                break;
+            }
+
+            $page++;
+            usleep(300000);
+        }
+
+        return $all;
+    }
+
+    // ── Subscriber logs (for activity sync) ──────────────────────────
+
+    /**
+     * Get email (campaign) log for a subscriber.
+     *
+     * Uses GET /subscribers/{email}/email-log
+     * Returns campaign events: send, open, click, hard_bounce, soft_bounce,
+     *                          out_of_band, unsub, spam, spam_complaint.
+     *
+     * @return array[]  List of event records
+     */
+    public function getSubscriberEmailLog(string $email, array $params = []): array
+    {
+        $encoded = urlencode($email);
+        $allEvents = [];
+        $page = 1;
+
+        while (true) {
+            $queryParams = array_merge($params, [
+                'per_page' => 100,
+                'page' => $page,
+            ]);
+
+            $response = $this->get("/subscribers/{$encoded}/email-log", $queryParams);
+
+            if ($response === null) {
+                break;
+            }
+
+            $logs = $response['email_log'] ?? $response['campaign_log'] ?? $response['data'] ?? [];
+
+            if (empty($logs) || !is_array($logs)) {
+                break;
+            }
+
+            foreach ($logs as $log) {
+                if (is_array($log)) {
+                    $allEvents[] = $log;
+                }
+            }
+
+            if (count($logs) < 100) {
+                break;
+            }
+
+            $page++;
+            usleep(200000);
+        }
+
+        return $allEvents;
+    }
+
+    /**
+     * Get automation (pipeline) log for a subscriber.
+     *
+     * Uses GET /subscribers/{email}/automation-log
+     * Returns automation events sorted by timestamp descending.
+     *
+     * @return array[]  List of event records
+     */
+    public function getSubscriberAutomationLog(string $email, array $params = []): array
+    {
+        $encoded = urlencode($email);
+        $allEvents = [];
+        $page = 1;
+
+        while (true) {
+            $queryParams = array_merge($params, [
+                'per_page' => 100,
+                'page' => $page,
+                'sort_by' => 'timestamp',
+                'sort_dir' => 'desc',
+            ]);
+
+            $response = $this->get("/subscribers/{$encoded}/automation-log", $queryParams);
+
+            if ($response === null) {
+                break;
+            }
+
+            $logs = $response['automation_log'] ?? $response['pipeline_log'] ?? $response['data'] ?? [];
+
+            if (empty($logs) || !is_array($logs)) {
+                break;
+            }
+
+            foreach ($logs as $log) {
+                if (is_array($log)) {
+                    $allEvents[] = $log;
+                }
+            }
+
+            if (count($logs) < 100) {
+                break;
+            }
+
+            $page++;
+            usleep(200000);
+        }
+
+        return $allEvents;
+    }
+
     // ── HTTP methods ──────────────────────────────────────────────────
 
     private function post(string $endpoint, array $data): ?array
