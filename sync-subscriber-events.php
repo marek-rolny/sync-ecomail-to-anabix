@@ -294,14 +294,12 @@ try {
         $emailLogEvents = $ecomail->getSubscriberEmailLog($email);
 
         if ($isDebug) {
-            $debugResponse = $ecomail->debugGet("/subscribers/" . urlencode($email) . "/email-log", ['per_page' => 5]);
+            $debugResponse = $ecomail->debugGet('/campaigns/log', ['email' => $email, 'per_page' => 5]);
             output("  [{$subNum}] {$email} (anabixId={$anabixId})");
-            output("    email-log HTTP {$debugResponse['_debug_http_code']}:");
-            if ($debugResponse['_debug_curl_error']) {
-                output("    cURL error: {$debugResponse['_debug_curl_error']}");
-            }
+            output("    email-log (via /campaigns/log) HTTP {$debugResponse['_debug_http_code']}:");
             output("    URL: {$debugResponse['_debug_url']}");
             output("    Body: " . mb_substr($debugResponse['_debug_body'], 0, 500));
+            output("    email events found: " . count($emailLogEvents));
         } else {
             output("  [{$subNum}/{$report['subscribers_total']}] {$email} (anabixId={$anabixId}) — emails: " . count($emailLogEvents));
         }
