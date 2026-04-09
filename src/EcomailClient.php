@@ -341,7 +341,6 @@ class EcomailClient
 
         while (true) {
             $queryParams = [
-                'campaign_id' => $campaignId,
                 'per_page' => 100,
                 'page' => $page,
                 'sort_by' => 'occured_at',
@@ -352,7 +351,8 @@ class EcomailClient
                 $queryParams['events[]'] = implode(',', $events);
             }
 
-            $response = $this->get('/campaigns/log', $queryParams);
+            // Endpoint: GET /campaigns/{id}/log (ID in path, not query param)
+            $response = $this->get("/campaigns/{$campaignId}/log", $queryParams);
 
             if ($response === null) {
                 break;
