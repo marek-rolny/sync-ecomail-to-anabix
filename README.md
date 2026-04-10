@@ -52,7 +52,45 @@ php activities-ecomail-to-anabix.php
 php activities-ecomail-to-anabix.php --dry-run
 ```
 
-### 3. `sync-sheets.php` — Google Sheets → Anabix aktivity
+### 3. `sync-automation-events.php` — Automatizace: Ecomail → Anabix
+
+Zrcadlo skriptu č. 2, ale nad automation pipelines (autoresponder, welcome série, opuštěný košík…). Pro každou pipeline načte `/pipelines/{id}/stats-detail` a per subscriber vytvoří aktivity v Anabixu.
+
+**Mapování eventů:**
+| Ecomail event | Anabix typ aktivity |
+|--------------|-------------------|
+| send | sent autoresponder |
+| open | opened autoresponder |
+| click | clicked link in autoresponder |
+| hard_bounce, soft_bounce, unsub, spam | note |
+
+**Formát aktivity:**
+- Title: `{název automatizace} - {event}` (u `open`/`click` navíc `(N×)`)
+- Body:
+  ```
+  Automatizace: {název automatizace} (viz Ecomail)
+  Stav: {event}                (u open/click: "{event} (N×)")
+  ```
+
+```bash
+php sync-automation-events.php
+php sync-automation-events.php --dry-run
+php sync-automation-events.php --pipeline=43453
+```
+
+### 4. `sync-subscriber-events.php` — Web tracker: Ecomail → Anabix
+
+Iteruje subscribery v Ecomail listu, načítá jejich `/subscribers/{email}/events` (web tracker — návštěvy webu, košík, nákup) a vytváří `note`-aktivity typu "Návštěva webu {domain}" v Anabixu.
+
+Newsletter events (send/open/click) řeší skript č. 2, automation events řeší skript č. 3 — tento skript se stará **výhradně** o web tracker.
+
+```bash
+php sync-subscriber-events.php
+php sync-subscriber-events.php --dry-run
+php sync-subscriber-events.php --email=test@example.com
+```
+
+### 5. `sync-sheets.php` — Google Sheets → Anabix aktivity
 
 Čte řádky z veřejné Google tabulky a vytváří aktivity (poznámky) u kontaktů v Anabixu.
 
@@ -84,12 +122,14 @@ Pro pravidelný sync přidejte do cronu:
 ## Struktura
 
 ```
-├── contacts-anabix-to-ecomail.php   # Hlavní sync kontaktů
-├── activities-ecomail-to-anabix.php # Sync email aktivit
+├── contacts-anabix-to-ecomail.php   # Sync kontaktů (Anabix → Ecomail)
+├── activities-ecomail-to-anabix.php # Sync newsletter aktivit (Ecomail → Anabix)
+├── sync-automation-events.php       # Sync automation/autoresponder aktivit
+├── sync-subscriber-events.php       # Sync web tracker aktivit
 ├── sync-sheets.php                  # Google Sheets → Anabix
 ├── src/
 │   ├── AnabixClient.php       # Anabix API (kontakty, seznamy, organizace, aktivity)
-│   ├── EcomailClient.php      # Ecomail API (subscribe-bulk, kampaně, email-log)
+│   ├── EcomailClient.php      # Ecomail API (subscribe-bulk, kampaně, pipelines, events)
 │   ├── Transformer.php        # Mapování Anabix → Ecomail (pretitle, custom fields, tagy)
 │   ├── SyncState.php          # Delta sync state (timestamp + lookback)
 │   ├── GoogleSheetsClient.php # Čtení veřejných Google tabulek
@@ -97,7 +137,7 @@ Pro pravidelný sync přidejte do cronu:
 │   └── env.php                # .env loader
 ├── storage/
 │   ├── logs/                  # Denní logy
-│   └── state/                 # Sync state, org cache
+│   └── state/                 # Sync state, org cache, dedup klíče
 ├── .env.example               # Vzorová konfigurace
 └── anabix_api_manual-2025.pdf # Anabix API manuál
 ```

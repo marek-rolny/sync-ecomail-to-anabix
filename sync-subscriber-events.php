@@ -1,26 +1,27 @@
 <?php
 
 /**
- * Sync all subscriber events from Ecomail → Anabix CRM.
+ * Sync web tracker events from Ecomail → Anabix CRM.
  *
- * Iterates subscribers, fetches their email-log (campaigns) and
- * automation-log (pipelines), and creates activities in Anabix.
+ * Iterates subscribers in the configured Ecomail list, fetches each
+ * subscriber's tracker events (/subscribers/{email}/events), and creates
+ * "Návštěva webu" notes in Anabix for new events (checkpoint dedup).
  *
- * Event type mapping:
- *   send / soft_bounce / hard_bounce / out_of_band  →  see $eventTypeMap
- *   open / click / unsub / spam / spam_complaint     →  see $eventTypeMap
+ * Scope:
+ *   - Only website tracker data (page views, basket, purchase, custom events).
+ *   - Campaign (newsletter) events are handled by activities-ecomail-to-anabix.php.
+ *   - Automation/autoresponder events are handled by sync-automation-events.php.
  *
- * Uses subscriber-centric approach:
- *   1. GET /lists/{id}/subscribers → list all subscribers
- *   2. For each subscriber with anabixId:
- *      a) GET /subscribers/{email}/email-log → campaign events
- *      b) GET /subscribers/{email}/automation-log → automation events
- *   3. Create Anabix activities for new events (checkpoint-based dedup)
+ * Activity format:
+ *   title = "Návštěva webu {domain}"
+ *   type  = note
+ *   body  = URL: ..., Akce: ..., Kategorie: ..., Datum: ...
  *
  * Usage:
  *   php sync-subscriber-events.php                (execute)
  *   php sync-subscriber-events.php --dry-run      (preview only)
  *   php sync-subscriber-events.php --full         (ignore checkpoint, process all)
+ *   php sync-subscriber-events.php --email=X      (test single subscriber)
  *   Browser: sync-subscriber-events.php?dry-run=1&full=1
  */
 
@@ -110,20 +111,6 @@ $activityIdUser = env('ANABIX_ACTIVITY_ID_USER', '') !== ''
     ? (int) env('ANABIX_ACTIVITY_ID_USER')
     : null;
 
-// ── Event type mapping (Ecomail → Anabix activity type) ─────────────
-
-$eventTypeMap = [
-    'send'           => 'sent autoresponder',
-    'open'           => 'opened autoresponder',
-    'click'          => 'clicked link in autoresponder',
-    'hard_bounce'    => 'note',
-    'soft_bounce'    => 'note',
-    'out_of_band'    => 'note',
-    'unsub'          => 'note',
-    'spam'           => 'note',
-    'spam_complaint' => 'note',
-];
-
 // ── Checkpoint (incremental sync) ───────────────────────────────────
 
 $stateDir = __DIR__ . '/storage/state';
@@ -146,68 +133,9 @@ function output(string $msg): void
     }
 }
 
-/**
- * Build activity body from an event record.
- */
-function buildActivityBody(array $event, string $source): string
-{
-    $eventType = $event['event'] ?? 'unknown';
-    $lines = [];
-    $lines[] = "Stav: {$eventType}";
-    $lines[] = "Zdroj: {$source}";
-
-    // Campaign-specific fields
-    $subject = $event['subject'] ?? $event['campaign_subject'] ?? '';
-    if ($subject !== '') {
-        $lines[] = "Předmět: {$subject}";
-    }
-
-    // Automation-specific fields
-    $pipelineName = $event['pipeline_name'] ?? $event['automation_name'] ?? '';
-    if ($pipelineName !== '') {
-        $lines[] = "Automatizace: {$pipelineName}";
-    }
-
-    $actionName = $event['action_name'] ?? '';
-    if ($actionName !== '') {
-        $lines[] = "Akce: {$actionName}";
-    }
-
-    // Common fields
-    $timestamp = $event['occured_at'] ?? $event['timestamp'] ?? $event['created_at'] ?? '';
-    if ($timestamp !== '') {
-        $lines[] = "Datum: {$timestamp}";
-    }
-
-    $url = $event['url'] ?? '';
-    if ($url !== '') {
-        $lines[] = "URL: {$url}";
-    }
-
-    $msg = $event['msg'] ?? '';
-    if ($msg !== '') {
-        $lines[] = "Detail: {$msg}";
-    }
-
-    return implode("\n", $lines);
-}
-
-/**
- * Get a deduplication key for an event record.
- */
-function eventDeduplicationKey(array $event, string $source, int $anabixId): string
-{
-    $eventId = $event['id'] ?? '';
-    $eventType = $event['event'] ?? $event['type'] ?? '';
-    $timestamp = $event['occured_at'] ?? $event['timestamp'] ?? $event['created_at'] ?? '';
-    $campaignId = $event['campaign_id'] ?? $event['pipeline_id'] ?? '';
-
-    return md5("{$source}|{$anabixId}|{$campaignId}|{$eventType}|{$eventId}|{$timestamp}");
-}
-
 // ── Run sync ────────────────────────────────────────────────────────
 
-output("=== Subscriber events: Ecomail → Anabix ===");
+output("=== Subscriber tracker events: Ecomail → Anabix ===");
 output("Mode: " . ($dryRun ? "DRY-RUN" : "EXECUTE"));
 if ($fullRun) {
     output("Run: FULL (processing all events, ignoring checkpoint)");
@@ -222,10 +150,9 @@ $report = [
     'subscribers_total' => 0,
     'subscribers_with_anabix_id' => 0,
     'subscribers_skipped' => 0,
-    'automation_log_events' => 0,
+    'tracker_events' => 0,
     'activities_created' => 0,
     'skipped_duplicate' => 0,
-    'skipped_unmapped' => 0,
     'failed' => 0,
     'errors' => [],
 ];
@@ -288,83 +215,10 @@ try {
         $subNum = $subIndex + 1;
         output("  [{$subNum}/{$report['subscribers_total']}] {$email} (anabixId={$anabixId})");
 
-        // NOTE: Campaign email events (open, click, send) are handled by
-        // activities-ecomail-to-anabix.php which iterates campaigns and
-        // uses GET /campaigns/log?campaign_id=X. The per-subscriber
-        // GET /campaigns/log?email=X requires campaign_id and cannot
-        // be used as a standalone subscriber filter.
-
-        // ── 2a. Automation log (pipeline events) ─────────────────────
-
-        $automationLogEvents = $ecomail->getSubscriberAutomationLog($email);
-        $report['automation_log_events'] += count($automationLogEvents);
-
-        foreach ($automationLogEvents as $event) {
-            // automation-log records have no 'event' field — they are pipeline
-            // execution records: {pipeline_id, action_id, trigger_id, timestamp}
-            // We create a 'note' activity for each pipeline execution.
-            $pipelineId = $event['pipeline_id'] ?? '';
-            $actionId   = $event['action_id'] ?? '';
-            if ($pipelineId === '' && $actionId === '') {
-                continue;
-            }
-
-            $deduKey = eventDeduplicationKey($event, 'automation', $anabixId);
-            if (isset($processedKeys[$deduKey])) {
-                $report['skipped_duplicate']++;
-                continue;
-            }
-
-            $title = "Automatizace #{$pipelineId}";
-            $timestamp = $event['timestamp'] ?? null;
-
-            $bodyLines = ["Spuštěna automatizace"];
-            if ($pipelineId !== '') {
-                $bodyLines[] = "Pipeline: #{$pipelineId}";
-            }
-            if ($actionId !== '') {
-                $bodyLines[] = "Akce: {$actionId}";
-            }
-            $triggerId = $event['trigger_id'] ?? '';
-            if ($triggerId !== '') {
-                $bodyLines[] = "Trigger: {$triggerId}";
-            }
-            if ($timestamp !== '') {
-                $bodyLines[] = "Datum: {$timestamp}";
-            }
-            $body = implode("\n", $bodyLines);
-
-            if ($dryRun) {
-                output("    [DRY] automation note: {$title}");
-                $report['activities_created']++;
-                $processedKeys[$deduKey] = true;
-                continue;
-            }
-
-            $result = $anabix->createActivity(
-                $anabixId,
-                $title,
-                $body,
-                'note',
-                $timestamp,
-                $activityIdUser
-            );
-
-            if ($result !== null) {
-                $report['activities_created']++;
-                $processedKeys[$deduKey] = true;
-            } else {
-                $report['failed']++;
-                $report['errors'][] = "Failed: {$email} automation #{$pipelineId}";
-            }
-
-            usleep(200000);
-        }
-
-        // ── 2c. Tracker events (web visits, basket, purchase, etc.) ──
+        // ── Tracker events (web visits, basket, purchase, etc.) ──────
 
         $trackerEvents = $ecomail->getSubscriberEvents($email);
-        $report['tracker_events'] = ($report['tracker_events'] ?? 0) + count($trackerEvents);
+        $report['tracker_events'] += count($trackerEvents);
 
         foreach ($trackerEvents as $event) {
             $action   = $event['action'] ?? '';
@@ -453,7 +307,7 @@ try {
 } catch (Throwable $e) {
     $report['errors'][] = $e->getMessage();
     output("ERROR: " . $e->getMessage());
-    $logger->error("Subscriber events sync failed", [
+    $logger->error("Subscriber tracker events sync failed", [
         'message' => $e->getMessage(),
         'file' => $e->getFile(),
         'line' => $e->getLine(),
@@ -493,11 +347,9 @@ output("=== Summary ===");
 output("Subscribers total:       {$report['subscribers_total']}");
 output("Subscribers with ID:     {$report['subscribers_with_anabix_id']}");
 output("Subscribers skipped:     {$report['subscribers_skipped']}");
-output("Automation log events:   {$report['automation_log_events']}");
-output("Tracker events:          " . ($report['tracker_events'] ?? 0));
+output("Tracker events:          {$report['tracker_events']}");
 output("Activities created:      {$report['activities_created']}");
 output("Skipped (duplicate):     {$report['skipped_duplicate']}");
-output("Skipped (unmapped):      {$report['skipped_unmapped']}");
 output("Failed:                  {$report['failed']}");
 
 if (!empty($report['errors'])) {
@@ -508,5 +360,5 @@ if (!empty($report['errors'])) {
     }
 }
 
-$logger->info("Subscriber events sync completed", $report);
+$logger->info("Subscriber tracker events sync completed", $report);
 echo json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . PHP_EOL;
