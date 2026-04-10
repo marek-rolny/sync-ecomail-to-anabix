@@ -151,7 +151,7 @@ foreach ($forms as $form) {
                     $title = "Webový formulář #{$formId}";
                     $body = Transformer::wlbToActivityNote($submission, $formId);
 
-                    $activityResult = $anabix->createActivity((int) $contactId, $title, $body, 'note', $activityOwnerId);
+                    $activityResult = $anabix->createActivity((int) $contactId, $title, $body, 'note', null, $activityOwnerId);
 
                     if ($activityResult !== null) {
                         $report['activities']++;

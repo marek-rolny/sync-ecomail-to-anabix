@@ -361,15 +361,15 @@ class AnabixClient
     /**
      * Create an activity on a contact.
      *
-     * @param int $contactId The Anabix contact ID
-     * @param string $title Activity title
-     * @param string $body Activity description
-     * @param string $type Activity type (e.g. 'note', 'email', 'call')
-     * @param int|null $ownerId Owner user ID in Anabix (e.g. 5 for "Robot Karel")
-     */
-    public function createActivity(int $contactId, string $title, string $body, string $type = 'note', ?int $ownerId = null): ?array
-    {
-     * Used by sync-sheets.php and activities-ecomail-to-anabix.php.
+     * Used by sync-sheets.php, activities-ecomail-to-anabix.php,
+     * sync-subscriber-events.php, import-form.php, and wlb-sync.php.
+     *
+     * @param int         $contactId  Anabix contact ID
+     * @param string      $title      Activity title
+     * @param string      $body       Activity description
+     * @param string      $type       Activity type (note, email, call, etc.)
+     * @param string|null $timestamp  Activity timestamp (Y-m-d H:i:s or unix); null = now
+     * @param int|null    $idUser     Owner user ID (e.g. 6 = Robot Karel)
      */
     public function createActivity(
         int $contactId,
@@ -390,14 +390,6 @@ class AnabixClient
             'title' => $title,
             'body' => $body,
             'type' => $type,
-            'timestamp' => date('Y-m-d H:i:s'),
-        ];
-
-        if ($ownerId !== null) {
-            $data['idOwner'] = $ownerId;
-        }
-
-        return $this->request('activities', 'create', $data);
             'timestamp' => $unixTimestamp,
         ];
 
