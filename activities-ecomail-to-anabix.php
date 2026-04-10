@@ -15,7 +15,7 @@
  * Event type mapping:
  *   send             → "sent newsletter"
  *   open             → "opened newsletter"
- *   click            → "clicked newsletter"
+ *   click            → "clicked link in newsletter"
  *   hard_bounce      → note
  *   soft_bounce      → note
  *   out_of_band      → note
@@ -23,11 +23,18 @@
  *   spam             → note
  *   spam_complaint   → note
  *
+ * Activity title format:
+ *   {subject} - {event}              (send, bounces, unsub, spam)
+ *   {subject} - {event} ({count}×)   (open, click — count always shown)
+ *
  * Activity body format:
- *   Stav: {event} (x{count})
+ *   Kampaň: {campaign title} (viz Ecomail)
+ *   Stav: {event}                    (or "{event} ({count}×)" for open/click)
  *   Předmět: {campaign subject}
  *   Od: {from_name} | {from_email}
  *   {archive_url}
+ *
+ *   Datum odeslání kampaně: {DD.MM.YYYY}
  *
  * Deduplication key:
  *   md5("{campaign_id}|{anabixId}|{event_type}")
@@ -136,7 +143,7 @@ $activityIdUser = env('ANABIX_ACTIVITY_ID_USER', '') !== ''
 $eventTypeMap = [
     'send'           => 'sent newsletter',
     'open'           => 'opened newsletter',
-    'click'          => 'clicked newsletter',
+    'click'          => 'clicked link in newsletter',
     'hard_bounce'    => 'note',
     'soft_bounce'    => 'note',
     'out_of_band'    => 'note',
@@ -304,17 +311,33 @@ try {
                     continue;
                 }
 
+                // For open/click events show count even when it is 1.
+                // For other events (send, bounces, unsub, spam) count is omitted.
+                $showCount = in_array($eventType, ['open', 'click'], true);
+                $statusLabel = $showCount
+                    ? "{$eventType} ({$count}×)"
+                    : $eventType;
+
+                // Build activity title
+                $activityTitle = "{$subject} - {$statusLabel}";
+
                 // Build activity body
                 $bodyLines = [];
-                $bodyLines[] = ($count > 1)
-                    ? "Stav: {$eventType} (×{$count})"
-                    : "Stav: {$eventType}";
+                $bodyLines[] = "Kampaň: {$title} (viz Ecomail)";
+                $bodyLines[] = "Stav: {$statusLabel}";
                 $bodyLines[] = "Předmět: {$subject}";
                 if ($fromName !== '' || $fromEmail !== '') {
                     $bodyLines[] = "Od: {$fromName} | {$fromEmail}";
                 }
                 if ($archiveUrl !== '') {
                     $bodyLines[] = $archiveUrl;
+                }
+                if ($sentAt !== null) {
+                    $sentTs = is_numeric($sentAt) ? (int) $sentAt : strtotime((string) $sentAt);
+                    if ($sentTs !== false && $sentTs > 0) {
+                        $bodyLines[] = '';
+                        $bodyLines[] = 'Datum odeslání kampaně: ' . date('d.m.Y', $sentTs);
+                    }
                 }
                 $body = implode("\n", $bodyLines);
 
@@ -328,7 +351,7 @@ try {
                 // Create activity in Anabix
                 $result = $anabix->createActivity(
                     $anabixId,
-                    $title,
+                    $activityTitle,
                     $body,
                     $activityType,
                     $sentAt,
