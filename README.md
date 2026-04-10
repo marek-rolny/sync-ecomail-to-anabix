@@ -31,8 +31,21 @@ php contacts-anabix-to-ecomail.php
 |--------------|-------------------|
 | send | sent newsletter |
 | open | opened newsletter |
-| click | clicked newsletter |
+| click | clicked link in newsletter |
 | hard_bounce, soft_bounce, unsub, spam, spam_complaint | note |
+
+**Formát aktivity:**
+- Title: `{předmět} - {event}` (u `open`/`click` navíc `(N×)`)
+- Body:
+  ```
+  Kampaň: {interní název kampaně} (viz Ecomail)
+  Stav: {event}                (u open/click: "{event} (N×)")
+  Předmět: {předmět kampaně}
+  Od: {from_name} | {from_email}
+  {archive_url}
+
+  Datum odeslání kampaně: {DD.MM.YYYY}
+  ```
 
 ```bash
 php activities-ecomail-to-anabix.php
