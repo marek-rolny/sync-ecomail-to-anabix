@@ -124,6 +124,62 @@ $activityIdUser = env('ANABIX_ACTIVITY_ID_USER', '') !== ''
     ? (int) env('ANABIX_ACTIVITY_ID_USER')
     : null;
 
+// ── Raw debug mode ───────────────────────────────────────────────────
+// ?raw=1&email=X — bypasses all sync logic; calls several candidate
+// Ecomail endpoints for a single subscriber and dumps the HTTP status +
+// first ~4KB of body. Lets us see what Ecomail actually returns for
+// web tracker events without trusting any of our parsing code.
+if (php_sapi_name() !== 'cli' && ($_GET['raw'] ?? '') === '1') {
+    header('Content-Type: text/plain; charset=utf-8');
+    $email = $_GET['email'] ?? '';
+    if ($email === '') {
+        echo "Usage: ?raw=1&email=<subscriber-email>\n";
+        exit;
+    }
+
+    $enc = urlencode($email);
+    $candidates = [
+        "/subscribers/{$enc}/events",
+        "/subscribers/{$enc}/events?per_page=100",
+        "/subscribers/{$enc}",
+        "/tracker/events?email={$enc}",
+        "/tracker/events?email={$enc}&per_page=100",
+        "/events?email={$enc}",
+    ];
+
+    foreach ($candidates as $endpoint) {
+        echo str_repeat('=', 70) . "\n";
+        echo "GET {$endpoint}\n";
+        echo str_repeat('=', 70) . "\n";
+
+        $result = $ecomail->debugGet($endpoint);
+        if ($result === null) {
+            echo "  (debugGet returned null — curl error)\n\n";
+            continue;
+        }
+        echo "HTTP {$result['_debug_http_code']}\n";
+        if (!empty($result['_debug_curl_error'])) {
+            echo "CURL ERROR: {$result['_debug_curl_error']}\n";
+        }
+
+        // Prefer pretty-printed parsed JSON (full response); fall back
+        // to truncated raw body if the response isn't JSON.
+        $parsed = $result['_debug_parsed'] ?? null;
+        if (is_array($parsed)) {
+            $pretty = json_encode(
+                $parsed,
+                JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+            );
+            echo mb_substr($pretty, 0, 4000);
+        } else {
+            echo "(non-JSON body)\n";
+            echo mb_substr((string) ($result['_debug_body'] ?? ''), 0, 4000);
+        }
+        echo "\n\n";
+    }
+    exit;
+}
+
 // ── Checkpoint (incremental sync) ───────────────────────────────────
 
 $stateDir = __DIR__ . '/storage/state';
