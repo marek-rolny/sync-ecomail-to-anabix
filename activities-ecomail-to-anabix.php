@@ -3,10 +3,14 @@
 /**
  * Sync email campaign activities from Ecomail → Anabix CRM.
  *
- * Uses date-based incremental sync via GET /campaigns/log?date_from=...
- * One API call (paginated) fetches all events across all campaigns since
- * the last sync, regardless of campaign count. Scales to thousands of
- * campaigns without issue.
+ * Uses /campaigns/{id}/stats-detail — per-subscriber aggregated counts
+ * per campaign (send/open/click/bounce/...). For each non-zero event type
+ * we create one Anabix activity.
+ *
+ * Why not /campaigns/log? Despite being documented, that endpoint returns
+ * HTTP 422 "The id must be a number" because the Ecomail API routes
+ * /campaigns/log as /campaigns/{id} with id="log". stats-detail is the
+ * only working source of campaign events.
  *
  * Event type mapping:
  *   send             → "sent newsletter"
@@ -20,18 +24,21 @@
  *   spam_complaint   → note
  *
  * Activity body format:
- *   Stav: {event}
+ *   Stav: {event} (x{count})
  *   Předmět: {campaign subject}
  *   Od: {from_name} | {from_email}
  *   {archive_url}
  *
- * Usage:
- *   php activities-ecomail-to-anabix.php                       (incremental, execute)
- *   php activities-ecomail-to-anabix.php --dry-run             (preview only)
- *   php activities-ecomail-to-anabix.php --full                (ignore checkpoint)
- *   php activities-ecomail-to-anabix.php --since=2025-01-01    (from specific date)
+ * Deduplication key:
+ *   md5("{campaign_id}|{anabixId}|{event_type}")
  *
- *   Browser: activities-ecomail-to-anabix.php?dry-run=1&full=1&since=2025-01-01
+ * Usage:
+ *   php activities-ecomail-to-anabix.php                       (execute)
+ *   php activities-ecomail-to-anabix.php --dry-run             (preview only)
+ *   php activities-ecomail-to-anabix.php --full                (reset dedup)
+ *   php activities-ecomail-to-anabix.php --campaign=3          (single campaign)
+ *
+ *   Browser: activities-ecomail-to-anabix.php?dry-run=1&campaign=3
  */
 
 // ── Error reporting (always show errors for diagnostics) ─────────────
@@ -90,18 +97,16 @@ foreach ($required as $var) {
 if (php_sapi_name() === 'cli') {
     $dryRun = in_array('--dry-run', $argv ?? [], true);
     $fullRun = in_array('--full', $argv ?? [], true);
-    $debug = in_array('--debug', $argv ?? [], true);
-    $sinceOverride = null;
+    $onlyCampaign = null;
     foreach ($argv ?? [] as $arg) {
-        if (str_starts_with($arg, '--since=')) {
-            $sinceOverride = substr($arg, 8);
+        if (str_starts_with($arg, '--campaign=')) {
+            $onlyCampaign = (int) substr($arg, 11);
         }
     }
 } else {
     $dryRun = ($_GET['dry-run'] ?? '') === '1';
     $fullRun = ($_GET['full'] ?? '') === '1';
-    $debug = ($_GET['debug'] ?? '') === '1';
-    $sinceOverride = $_GET['since'] ?? null;
+    $onlyCampaign = isset($_GET['campaign']) ? (int) $_GET['campaign'] : null;
 }
 
 // ── Initialize ────────────────────────────────────────────────────────
@@ -140,7 +145,7 @@ $eventTypeMap = [
     'spam_complaint' => 'note',
 ];
 
-// ── State (checkpoint + dedup) ────────────────────────────────────────
+// ── State (deduplication) ────────────────────────────────────────────
 
 $stateDir = __DIR__ . '/storage/state';
 if (!is_dir($stateDir)) {
@@ -153,18 +158,7 @@ if (file_exists($stateFile)) {
     $state = json_decode(file_get_contents($stateFile), true) ?: [];
 }
 
-$lastSyncDate = $state['last_sync_date'] ?? null;  // YYYY-MM-DD
-$processedEventIds = $state['processed_event_ids'] ?? [];
-
-// Determine date_from for this run
-if ($sinceOverride !== null && $sinceOverride !== '') {
-    $dateFrom = $sinceOverride;
-} elseif ($fullRun) {
-    $dateFrom = null;  // full historical sync
-    $processedEventIds = [];  // reset dedup
-} else {
-    $dateFrom = $lastSyncDate;  // incremental
-}
+$processedKeys = ($fullRun) ? [] : ($state['processed_keys'] ?? []);
 
 // ── Helper ────────────────────────────────────────────────────────────
 
@@ -177,6 +171,15 @@ function output(string $msg): void
     }
 }
 
+function saveState(string $stateFile, array $state): void
+{
+    file_put_contents(
+        $stateFile,
+        json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE),
+        LOCK_EX
+    );
+}
+
 // ── Run sync ──────────────────────────────────────────────────────────
 
 output("=== Ecomail activities → Anabix ===");
@@ -184,16 +187,17 @@ if ($dryRun) {
     output("DRY RUN — no changes will be made in Anabix.");
 }
 if ($fullRun) {
-    output("Run: FULL (all historical events, dedup reset)");
-} elseif ($dateFrom !== null) {
-    output("Run: INCREMENTAL (events from {$dateFrom})");
-} else {
-    output("Run: FIRST RUN (no checkpoint, all events)");
+    output("Run: FULL (dedup reset, all events reprocessed)");
+}
+if ($onlyCampaign !== null) {
+    output("Run: SINGLE CAMPAIGN #{$onlyCampaign}");
 }
 
 $report = [
     'status' => 'ok',
-    'events_fetched' => 0,
+    'campaigns_processed' => 0,
+    'campaigns_skipped' => 0,
+    'subscribers_processed' => 0,
     'activities_created' => 0,
     'skipped_no_anabix_id' => 0,
     'skipped_duplicate' => 0,
@@ -205,187 +209,157 @@ $report = [
 $runStartedAt = date('Y-m-d H:i:s');
 
 try {
-    // ── 0. Debug mode: raw API probes ─────────────────────────────────
+    // ── 1. Fetch campaigns list ───────────────────────────────────────
 
-    if ($debug) {
-        output("");
-        output("=== DEBUG: raw API probes ===");
+    output("Fetching campaigns from Ecomail...");
+    $campaigns = $ecomail->getCampaigns('sent');
 
-        // Probe 1: /campaigns/log with no filters
-        output("Probe 1: GET /campaigns/log?per_page=5 (no filters)");
-        $probe1 = $ecomail->debugGet('/campaigns/log', ['per_page' => 5]);
-        output("  HTTP: {$probe1['_debug_http_code']}");
-        output("  URL:  {$probe1['_debug_url']}");
-        output("  Body: " . mb_substr($probe1['_debug_body'], 0, 600));
-        output("");
-
-        // Probe 2: /campaigns/log filtered by campaign_id=3 (the only real campaign)
-        output("Probe 2: GET /campaigns/log?campaign_id=3&per_page=5");
-        $probe2 = $ecomail->debugGet('/campaigns/log', ['campaign_id' => 3, 'per_page' => 5]);
-        output("  HTTP: {$probe2['_debug_http_code']}");
-        output("  URL:  {$probe2['_debug_url']}");
-        output("  Body: " . mb_substr($probe2['_debug_body'], 0, 600));
-        output("");
-
-        // Probe 3: /campaigns/3/stats-detail (alternative: per-campaign aggregates)
-        output("Probe 3: GET /campaigns/3/stats-detail?per_page=5");
-        $probe3 = $ecomail->debugGet('/campaigns/3/stats-detail', ['per_page' => 5]);
-        output("  HTTP: {$probe3['_debug_http_code']}");
-        output("  URL:  {$probe3['_debug_url']}");
-        output("  Body: " . mb_substr($probe3['_debug_body'], 0, 600));
-        output("");
-
-        // Probe 4: /campaigns/log filtered by known subscriber email
-        output("Probe 4: GET /campaigns/log?email=marek@optimal-marketing.cz&per_page=5");
-        $probe4 = $ecomail->debugGet('/campaigns/log', ['email' => 'marek@optimal-marketing.cz', 'per_page' => 5]);
-        output("  HTTP: {$probe4['_debug_http_code']}");
-        output("  URL:  {$probe4['_debug_url']}");
-        output("  Body: " . mb_substr($probe4['_debug_body'], 0, 600));
-        output("");
-
-        output("=== END DEBUG ===");
-        output("");
+    if (empty($campaigns)) {
+        output("No sent campaigns found.");
         goto finish;
     }
 
-    // ── 1. Fetch all events via /campaigns/log ────────────────────────
+    output("Found " . count($campaigns) . " sent campaign(s).");
 
-    $filters = [];
-    if ($dateFrom !== null && $dateFrom !== '') {
-        $filters['date_from'] = $dateFrom;
-    }
-
-    output("Fetching campaign events from Ecomail...");
-    output("  Filters: " . (empty($filters) ? '(none)' : json_encode($filters)));
-
-    $events = $ecomail->getCampaignLog($filters);
-    $report['events_fetched'] = count($events);
-
-    output("  Fetched " . count($events) . " event(s).");
-
-    if (empty($events)) {
-        output("No events to process.");
-        goto finish;
-    }
-
-    // ── 2. Fetch campaigns once, build lookup map ─────────────────────
-
-    output("Loading campaign details for lookup...");
-    $campaigns = $ecomail->getCampaigns();
-    $campaignMap = [];
-    foreach ($campaigns as $c) {
-        $cid = $c['id'] ?? $c['campaign_id'] ?? null;
-        if ($cid !== null) {
-            $campaignMap[(int) $cid] = $c;
+    // Filter to single campaign if requested
+    if ($onlyCampaign !== null) {
+        $campaigns = array_filter($campaigns, function ($c) use ($onlyCampaign) {
+            $cid = (int) ($c['id'] ?? $c['campaign_id'] ?? 0);
+            return $cid === $onlyCampaign;
+        });
+        if (empty($campaigns)) {
+            output("Campaign #{$onlyCampaign} not found in sent list.");
+            goto finish;
         }
     }
-    output("  Loaded " . count($campaignMap) . " campaign(s).");
 
-    // ── 3. Process events ─────────────────────────────────────────────
+    // Cache for anabixId lookups across all campaigns
+    $anabixIdCache = [];
 
-    $anabixIdCache = [];  // email → anabixId (cached across whole run)
+    // ── 2. Process each campaign ──────────────────────────────────────
 
-    foreach ($events as $event) {
-        $eventId = $event['id'] ?? null;
-        $email = $event['email'] ?? '';
-        $eventType = $event['event'] ?? '';
-        $campaignId = $event['campaign_id'] ?? null;
-
-        if ($eventId === null || $email === '' || $eventType === '') {
+    foreach ($campaigns as $campaign) {
+        $campaignId = (int) ($campaign['id'] ?? $campaign['campaign_id'] ?? 0);
+        if ($campaignId === 0) {
             continue;
         }
 
-        // Dedup by Ecomail event ID (stable, unique)
-        if (isset($processedEventIds[$eventId])) {
-            $report['skipped_duplicate']++;
-            continue;
-        }
-
-        // Map event type to Anabix activity type
-        $activityType = $eventTypeMap[$eventType] ?? null;
-        if ($activityType === null) {
-            $report['skipped_unmapped']++;
-            continue;
-        }
-
-        // Get anabixId (cached lookup via Ecomail subscriber)
-        if (!array_key_exists($email, $anabixIdCache)) {
-            $subscriber = $ecomail->getSubscriber($email);
-            $anabixIdCache[$email] = $subscriber['custom_fields']['anabixId']
-                ?? $subscriber['merge_fields']['anabixId']
-                ?? null;
-            usleep(150000);
-        }
-
-        $anabixId = $anabixIdCache[$email];
-        if ($anabixId === null || (int) $anabixId === 0) {
-            $report['skipped_no_anabix_id']++;
-            continue;
-        }
-
-        // Lookup campaign details for title/subject/from/archive_url
-        $campaign = $campaignMap[(int) $campaignId] ?? [];
-        $subject = $campaign['subject']
-            ?? $campaign['title']
-            ?? $event['mail_name']
-            ?? "(kampaň #{$campaignId})";
+        $subject = $campaign['subject'] ?? $campaign['title'] ?? '(no subject)';
         $title = $campaign['title'] ?? $subject;
         $fromName = $campaign['from_name'] ?? '';
         $fromEmail = $campaign['from_email'] ?? '';
+        $sentAt = $campaign['date_sent']
+            ?? $campaign['sent_at']
+            ?? $campaign['send_at']
+            ?? $campaign['created_at']
+            ?? null;
         $archiveUrl = $campaign['archive_url'] ?? '';
 
-        // Build activity body
-        $bodyLines = ["Stav: {$eventType}"];
-        $bodyLines[] = "Předmět: {$subject}";
-        if ($fromName !== '' || $fromEmail !== '') {
-            $bodyLines[] = "Od: {$fromName} | {$fromEmail}";
-        }
-        if (!empty($event['url'])) {
-            $bodyLines[] = "URL: {$event['url']}";
-        }
-        if ($archiveUrl !== '') {
-            $bodyLines[] = $archiveUrl;
-        }
-        $body = implode("\n", $bodyLines);
+        output("Campaign #{$campaignId}: {$subject}");
 
-        $timestamp = $event['occured_at'] ?? null;
+        // Fetch per-subscriber aggregated counts
+        $subscribers = $ecomail->getCampaignStatsDetail($campaignId);
 
-        if ($dryRun) {
-            output("  [DRY] {$email} (anabixId={$anabixId}): {$eventType} → {$activityType} | {$title}");
-            $report['activities_created']++;
-            $processedEventIds[$eventId] = true;
+        if (empty($subscribers)) {
+            output("  No subscribers in stats-detail.");
+            $report['campaigns_processed']++;
             continue;
         }
 
-        // Create activity in Anabix
-        $result = $anabix->createActivity(
-            (int) $anabixId,
-            $title,
-            $body,
-            $activityType,
-            $timestamp,
-            $activityIdUser
-        );
+        output("  Subscribers: " . count($subscribers));
 
-        if ($result !== null) {
-            $report['activities_created']++;
-            $processedEventIds[$eventId] = true;
-
-            // Save checkpoint every 50 created activities
-            if ($report['activities_created'] % 50 === 0) {
-                $state['processed_event_ids'] = $processedEventIds;
-                file_put_contents(
-                    $stateFile,
-                    json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE),
-                    LOCK_EX
-                );
+        foreach ($subscribers as $email => $stats) {
+            if (!is_array($stats) || $email === '') {
+                continue;
             }
-        } else {
-            $report['failed']++;
-            $report['errors'][] = "Failed: eventId={$eventId} email={$email} event={$eventType}";
+            $report['subscribers_processed']++;
+
+            // Get anabixId (cached)
+            if (!array_key_exists($email, $anabixIdCache)) {
+                $subscriber = $ecomail->getSubscriber($email);
+                $anabixIdCache[$email] = $subscriber['custom_fields']['anabixId']
+                    ?? $subscriber['merge_fields']['anabixId']
+                    ?? null;
+                usleep(150000);
+            }
+
+            $anabixId = $anabixIdCache[$email];
+            if ($anabixId === null || (int) $anabixId === 0) {
+                $report['skipped_no_anabix_id']++;
+                continue;
+            }
+            $anabixId = (int) $anabixId;
+
+            // For each event type with non-zero count → create activity
+            foreach ($eventTypeMap as $eventType => $activityType) {
+                $count = (int) ($stats[$eventType] ?? 0);
+                if ($count === 0) {
+                    continue;
+                }
+
+                // Dedup: campaign + contact + event type
+                $dedupKey = md5("{$campaignId}|{$anabixId}|{$eventType}");
+                if (isset($processedKeys[$dedupKey])) {
+                    $report['skipped_duplicate']++;
+                    continue;
+                }
+
+                // Build activity body
+                $bodyLines = [];
+                $bodyLines[] = ($count > 1)
+                    ? "Stav: {$eventType} (×{$count})"
+                    : "Stav: {$eventType}";
+                $bodyLines[] = "Předmět: {$subject}";
+                if ($fromName !== '' || $fromEmail !== '') {
+                    $bodyLines[] = "Od: {$fromName} | {$fromEmail}";
+                }
+                if ($archiveUrl !== '') {
+                    $bodyLines[] = $archiveUrl;
+                }
+                $body = implode("\n", $bodyLines);
+
+                if ($dryRun) {
+                    output("  [DRY] {$email} (anabixId={$anabixId}): {$eventType}×{$count} → {$activityType}");
+                    $report['activities_created']++;
+                    $processedKeys[$dedupKey] = true;
+                    continue;
+                }
+
+                // Create activity in Anabix
+                $result = $anabix->createActivity(
+                    $anabixId,
+                    $title,
+                    $body,
+                    $activityType,
+                    $sentAt,
+                    $activityIdUser
+                );
+
+                if ($result !== null) {
+                    $report['activities_created']++;
+                    $processedKeys[$dedupKey] = true;
+
+                    // Checkpoint every 50 successes
+                    if ($report['activities_created'] % 50 === 0) {
+                        $state['processed_keys'] = $processedKeys;
+                        saveState($stateFile, $state);
+                    }
+                } else {
+                    $report['failed']++;
+                    $report['errors'][] = "Failed: campaign={$campaignId} email={$email} event={$eventType}";
+                }
+
+                usleep(150000);
+            }
         }
 
-        usleep(150000); // ~7 req/s rate limit
+        $report['campaigns_processed']++;
+
+        // Save state after each campaign
+        if (!$dryRun) {
+            $state['processed_keys'] = $processedKeys;
+            saveState($stateFile, $state);
+        }
     }
 
 } catch (Throwable $e) {
@@ -401,36 +375,30 @@ try {
 
 finish:
 
-// ── Save state ────────────────────────────────────────────────────────
+// ── Save final state ─────────────────────────────────────────────────
 
 if (!$dryRun) {
-    $state['last_sync_date'] = date('Y-m-d');  // next run picks up from here
+    $state['processed_keys'] = $processedKeys;
     $state['last_sync_started_at'] = $runStartedAt;
     $state['last_sync_finished_at'] = date('Y-m-d H:i:s');
-    $state['processed_event_ids'] = $processedEventIds;
-
-    file_put_contents(
-        $stateFile,
-        json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE),
-        LOCK_EX
-    );
+    saveState($stateFile, $state);
 
     output("");
-    output("Checkpoint saved: last_sync_date={$state['last_sync_date']}");
-    output("Dedup event IDs stored: " . count($processedEventIds));
+    output("Checkpoint saved: " . count($processedKeys) . " dedup keys stored");
 }
 
 // ── Summary ──────────────────────────────────────────────────────────
 
 output("");
 output("=== Summary ===");
-output("Events fetched:  {$report['events_fetched']}");
-output("Created:         {$report['activities_created']}");
-output("No anabixId:     {$report['skipped_no_anabix_id']}");
-output("Duplicates:      {$report['skipped_duplicate']}");
-output("Unmapped:        {$report['skipped_unmapped']}");
-output("Failed:          {$report['failed']}");
-output("Status:          {$report['status']}");
+output("Campaigns:        {$report['campaigns_processed']}");
+output("Subscribers:      {$report['subscribers_processed']}");
+output("Created:          {$report['activities_created']}");
+output("No anabixId:      {$report['skipped_no_anabix_id']}");
+output("Duplicates:       {$report['skipped_duplicate']}");
+output("Unmapped:         {$report['skipped_unmapped']}");
+output("Failed:           {$report['failed']}");
+output("Status:           {$report['status']}");
 
 $logger->info("Activities sync completed", $report);
 
