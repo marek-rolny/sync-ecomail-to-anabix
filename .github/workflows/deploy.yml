@@ -4,6 +4,13 @@ on:
   push:
     branches:
       - master
+      - 'claude/**'
+  workflow_dispatch:
+
+# Serialize deploys for the same branch; cancel superseded runs.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   deploy:
@@ -25,3 +32,69 @@ jobs:
           server-dir: /web71.cz/web/app/automatizace/
           state-name: .ftp-deploy-sync-state.json
           dangerous-clean-slate: false
+
+      # ── Post-deploy smoke test ─────────────────────────────────────
+      # Each PHP entry-point exposes GET ?ping=1 which returns
+      # {"script":"...","mtime":"...","status":"ok"}. We curl every
+      # script and fail the job if any of them is missing (HTTP 404) or
+      # fails to execute (HTTP 5xx / unexpected body).
+      #
+      # Note: FTP-Deploy-Action only re-uploads files whose content
+      # changed, so we intentionally do NOT enforce "mtime must be
+      # fresher than this run" — unchanged files keep their old mtime.
+      # We report mtime in the log for visibility only.
+      - name: Smoke test deployed scripts
+        env:
+          BASE_URL: https://app.web71.cz/automatizace
+        run: |
+          set -u
+          SCRIPTS=(
+            contacts-anabix-to-ecomail
+            activities-ecomail-to-anabix
+            sync-automation-events
+            sync-subscriber-events
+            sync-sheets
+          )
+
+          failed=0
+          echo "Base URL: $BASE_URL"
+          echo ""
+
+          for s in "${SCRIPTS[@]}"; do
+            url="${BASE_URL}/${s}.php?ping=1"
+            echo "→ ${s}.php"
+
+            response=$(curl -sS --max-time 20 -w "\n%{http_code}" "$url" || echo -e "\nCURL_FAIL")
+            code=$(echo "$response" | tail -n1)
+            body=$(echo "$response" | sed '$d')
+
+            if [ "$code" = "CURL_FAIL" ]; then
+              echo "   FAIL: curl failed (network / DNS / TLS)"
+              failed=1
+              continue
+            fi
+
+            if [ "$code" != "200" ]; then
+              echo "   FAIL: HTTP $code"
+              echo "   body: $(echo "$body" | head -c 200)"
+              failed=1
+              continue
+            fi
+
+            if ! echo "$body" | grep -q '"status":"ok"'; then
+              echo "   FAIL: unexpected body:"
+              echo "   $(echo "$body" | head -c 200)"
+              failed=1
+              continue
+            fi
+
+            mtime_iso=$(echo "$body" | sed -n 's/.*"mtime":"\([^"]*\)".*/\1/p')
+            echo "   OK  mtime=${mtime_iso:-unknown}"
+          done
+
+          echo ""
+          if [ "$failed" -ne 0 ]; then
+            echo "One or more smoke tests failed — deploy is NOT verified."
+            exit 1
+          fi
+          echo "All smoke tests passed — deploy verified."

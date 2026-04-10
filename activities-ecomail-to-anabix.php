@@ -48,6 +48,19 @@
  *   Browser: activities-ecomail-to-anabix.php?dry-run=1&campaign=3
  */
 
+// ── Deploy smoke-test endpoint (must stay at top, no dependencies) ───
+// Usage: GET ?ping=1 → JSON {script, mtime, status}. Used by CI
+// to verify that the file was deployed and PHP is able to execute it.
+if (php_sapi_name() !== 'cli' && ($_GET['ping'] ?? '') === '1') {
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'script' => basename(__FILE__),
+        'mtime'  => date('c', (int) @filemtime(__FILE__)),
+        'status' => 'ok',
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 // ── Error reporting (always show errors for diagnostics) ─────────────
 error_reporting(E_ALL);
 ini_set('display_errors', '1');

@@ -12,6 +12,19 @@
  * Usage: php sync-sheets.php
  */
 
+// ── Deploy smoke-test endpoint (must stay at top, no dependencies) ───
+// Usage: GET ?ping=1 → JSON {script, mtime, status}. Used by CI
+// to verify that the file was deployed and PHP is able to execute it.
+if (php_sapi_name() !== 'cli' && ($_GET['ping'] ?? '') === '1') {
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'script' => basename(__FILE__),
+        'mtime'  => date('c', (int) @filemtime(__FILE__)),
+        'status' => 'ok',
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 // ── Web compatibility: prevent proxy timeout ─────────────────────────
 set_time_limit(0);
 ini_set('max_execution_time', '0');
