@@ -180,6 +180,16 @@ $forceSince = env('SYNC_FORCE_SINCE', '') ?: null;
 // Default owner: ANABIX_OWNER_6 ("Robot Karel") — used when contact's idOwner is not in the map
 $defaultOwner = $ownerMap[6] ?? 'Robot Karel';
 
+// ── Trigger tags for Ecomail automation ──────────────────────────────
+// Tags that should fire "Kontakt dostane štítek" automations.
+// subscribe-bulk cannot trigger these; a separate PUT update-subscriber call is needed.
+
+$triggerTagsRaw = env('ECOMAIL_TRIGGER_TAGS', '');
+$triggerTags = $triggerTagsRaw !== ''
+    ? array_values(array_filter(array_map('trim', explode(',', $triggerTagsRaw))))
+    : [];
+$tagCacheFile = __DIR__ . '/storage/state/tag_cache.json';
+
 $transformer = new Transformer($ownerMap, $customFieldMap, $birthdayFieldId, $defaultOwner);
 
 $checkpoint = new CheckpointManager(__DIR__ . '/storage/state');
@@ -218,7 +228,9 @@ function processContactPages(
     int $batchSize,
     ?int &$maxTimestamp = null,
     ?CheckpointManager $checkpoint = null,
-    ?int $resumeFromOffset = null
+    ?int $resumeFromOffset = null,
+    array $triggerTags = [],
+    string $tagCacheFile = ''
 ): bool {
     $hasContacts = false;
     $debugDone = false;
@@ -426,6 +438,12 @@ function processContactPages(
                     ]);
                 }
 
+                // Fire separate PUT calls for contacts with newly-added trigger tags
+                // so Ecomail "Kontakt dostane štítek" automations are triggered.
+                if ($result['failed'] === 0 && !empty($triggerTags) && $tagCacheFile !== '') {
+                    $ecomail->processTriggerTagUpdates($subscribers, $triggerTags, $tagCacheFile);
+                }
+
                 $subscribers = []; // free memory
                 sleep(2); // rate limiting
             }
@@ -531,7 +549,8 @@ try {
         $report, $subscribers, $batchNum, $orgCache, $seenEmails,
         $anabix, $ecomail, $transformer, $logger,
         $fetchOrgs, $orgConcurrency, $batchSize,
-        $maxTimestamp, $checkpoint, $resumeFromOffset
+        $maxTimestamp, $checkpoint, $resumeFromOffset,
+        $triggerTags, $tagCacheFile
     );
 
     $logger->info("Fetch complete", [
@@ -551,7 +570,8 @@ try {
             $report, $subscribers, $batchNum, $orgCache, $seenEmails,
             $anabix, $ecomail, $transformer, $logger,
             $fetchOrgs, $orgConcurrency, $batchSize,
-            $maxTimestamp, $checkpoint
+            $maxTimestamp, $checkpoint, null,
+            $triggerTags, $tagCacheFile
         );
     }
 
@@ -573,6 +593,11 @@ try {
         // Show Ecomail raw response for debugging
         if (isset($result['ecomail_response'])) {
             output("  Ecomail response: " . json_encode($result['ecomail_response'], JSON_UNESCAPED_UNICODE));
+        }
+
+        // Fire separate PUT calls for contacts with newly-added trigger tags
+        if ($result['failed'] === 0 && !empty($triggerTags)) {
+            $ecomail->processTriggerTagUpdates($subscribers, $triggerTags, $tagCacheFile);
         }
 
         $subscribers = [];

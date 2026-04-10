@@ -164,6 +164,146 @@ class EcomailClient
         ];
     }
 
+    // ── Tag-triggered automation ──────────────────────────────────────
+
+    /**
+     * Update all tags for a subscriber via PUT /lists/{listId}/update-subscriber.
+     *
+     * IMPORTANT: Ecomail's tags field on this endpoint OVERWRITES existing tags.
+     * Always pass the complete set of tags for the contact, not just the new ones.
+     *
+     * Used to trigger tag-based automations — subscribe-bulk does not fire
+     * "Kontakt dostane štítek" triggers; only a separate tag update call does.
+     *
+     * @param string  $email    Subscriber email
+     * @param array   $allTags  Complete list of all tags the contact should have
+     * @return bool   True if the API call succeeded
+     */
+    public function updateSubscriberTags(string $email, array $allTags): bool
+    {
+        $payload = [
+            'subscriber_data' => [
+                'email' => $email,
+                'tags'  => array_values($allTags),
+            ],
+        ];
+
+        $response = $this->put("/lists/{$this->listId}/update-subscriber", $payload);
+
+        if ($response === null) {
+            $this->logger->error("PUT update-subscriber failed", [
+                'email' => $email,
+                'tags'  => $allTags,
+            ]);
+            return false;
+        }
+
+        $this->logger->info("PUT update-subscriber OK", [
+            'email'      => $email,
+            'tags_count' => count($allTags),
+            'response'   => $response,
+        ]);
+
+        return true;
+    }
+
+    /**
+     * After a successful subscribe-bulk batch, detect contacts with newly-added
+     * trigger tags and fire a separate PUT update-subscriber for each of them.
+     *
+     * The call causes Ecomail to evaluate "Kontakt dostane štítek" triggers and
+     * start any linked automation pipelines — something subscribe-bulk cannot do.
+     *
+     * Detection is purely local: we compare current tags against a JSON cache so
+     * we never need to call GET subscriber for each contact.
+     *
+     * Cache format (storage/state/tag_cache.json):
+     *   { "foo@bar.cz": ["re-engagement"], "baz@bar.cz": ["test-autoresponderu"] }
+     *
+     * @param array[] $subscribers   Subscriber payloads that were sent in the batch
+     *                               (each must have 'email' and optionally 'tags')
+     * @param string[] $triggerTags  Tag names that should fire automation
+     * @param string   $tagCacheFile Absolute path to the JSON cache file
+     */
+    public function processTriggerTagUpdates(array $subscribers, array $triggerTags, string $tagCacheFile): void
+    {
+        if (empty($triggerTags) || empty($subscribers)) {
+            return;
+        }
+
+        // Load cache (created automatically on first run)
+        $tagCache = [];
+        if (file_exists($tagCacheFile)) {
+            $tagCache = json_decode(file_get_contents($tagCacheFile), true) ?: [];
+        }
+
+        $cacheUpdated = false;
+
+        foreach ($subscribers as $subscriber) {
+            $email = strtolower(trim($subscriber['email'] ?? ''));
+            if ($email === '') {
+                continue;
+            }
+
+            $allTags = $subscriber['tags'] ?? [];
+
+            // Which trigger tags does this contact currently have?
+            $contactTriggerTags = array_values(array_intersect($allTags, $triggerTags));
+            $cachedTriggerTags  = $tagCache[$email] ?? [];
+
+            $newTriggerTags = array_values(array_diff($contactTriggerTags, $cachedTriggerTags));
+
+            if (!empty($newTriggerTags)) {
+                // New trigger tag detected → call PUT to fire the automation
+                $this->logger->info("New trigger tag detected, calling PUT update-subscriber", [
+                    'email'            => $email,
+                    'new_trigger_tags' => $newTriggerTags,
+                    'all_tags'         => $allTags,
+                ]);
+
+                $success = $this->updateSubscriberTags($email, $allTags);
+
+                if ($success) {
+                    $tagCache[$email] = $contactTriggerTags;
+                    $cacheUpdated = true;
+                } else {
+                    $this->logger->error("PUT failed, tag cache NOT updated (will retry next sync)", [
+                        'email' => $email,
+                    ]);
+                }
+
+                usleep(200000); // 200 ms rate limit between PUT calls
+
+            } elseif ($contactTriggerTags !== $cachedTriggerTags) {
+                // Trigger tags changed but no new ones (some were removed) —
+                // update cache so re-adding a tag is correctly detected later.
+                if (empty($contactTriggerTags)) {
+                    unset($tagCache[$email]);
+                } else {
+                    $tagCache[$email] = $contactTriggerTags;
+                }
+                $cacheUpdated = true;
+            }
+        }
+
+        if ($cacheUpdated) {
+            $this->saveTagCache($tagCacheFile, $tagCache);
+        }
+    }
+
+    private function saveTagCache(string $tagCacheFile, array $tagCache): void
+    {
+        $dir = dirname($tagCacheFile);
+        if (!is_dir($dir)) {
+            mkdir($dir, 0755, true);
+        }
+        file_put_contents(
+            $tagCacheFile,
+            json_encode($tagCache, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE),
+            LOCK_EX
+        );
+    }
+
     // ── Subscriber list & cleanup (GDPR) ───────────────────────────────
 
     /**
@@ -690,6 +830,11 @@ class EcomailClient
         return $this->httpRequest('POST', $endpoint, $data);
     }
 
+    private function put(string $endpoint, array $data): ?array
+    {
+        return $this->httpRequest('PUT', $endpoint, $data);
+    }
+
     private function get(string $endpoint, array $params = []): ?array
     {
         return $this->httpRequest('GET', $endpoint, $params);
@@ -713,6 +858,10 @@ class EcomailClient
         if ($method === 'POST') {
             $options[CURLOPT_URL] = $url;
             $options[CURLOPT_POST] = true;
+            $options[CURLOPT_POSTFIELDS] = json_encode($data, JSON_UNESCAPED_UNICODE);
+        } elseif ($method === 'PUT') {
+            $options[CURLOPT_URL] = $url;
+            $options[CURLOPT_CUSTOMREQUEST] = 'PUT';
             $options[CURLOPT_POSTFIELDS] = json_encode($data, JSON_UNESCAPED_UNICODE);
         } elseif ($method === 'DELETE') {
             $options[CURLOPT_URL] = $url;
