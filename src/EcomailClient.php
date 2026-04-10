@@ -181,10 +181,15 @@ class EcomailClient
      */
     public function updateSubscriberTags(string $email, array $allTags): bool
     {
+        // PUT /lists/{id}/update-subscriber expects:
+        //   { "email": "...", "subscriber_data": { "tags": [...] } }
+        // — email identifies the subscriber at top level, subscriber_data holds
+        // the fields to update. (Ecomail responds 422 "email_required" if email
+        // is nested inside subscriber_data instead of at the root.)
         $payload = [
+            'email' => $email,
             'subscriber_data' => [
-                'email' => $email,
-                'tags'  => array_values($allTags),
+                'tags' => array_values($allTags),
             ],
         ];
 
