@@ -441,6 +441,10 @@ function processContactPages(
                 // Fire separate PUT calls for contacts with newly-added trigger tags
                 // so Ecomail "Kontakt dostane štítek" automations are triggered.
                 if ($result['failed'] === 0 && !empty($triggerTags) && $tagCacheFile !== '') {
+                    $logger->debug("processTriggerTagUpdates called", [
+                        'trigger_tags' => $triggerTags,
+                        'subscriber_count' => count($subscribers),
+                    ]);
                     $ecomail->processTriggerTagUpdates($subscribers, $triggerTags, $tagCacheFile);
                 }
 
@@ -597,6 +601,10 @@ try {
 
         // Fire separate PUT calls for contacts with newly-added trigger tags
         if ($result['failed'] === 0 && !empty($triggerTags)) {
+            $logger->debug("processTriggerTagUpdates called (final batch)", [
+                'trigger_tags' => $triggerTags,
+                'subscriber_count' => count($subscribers),
+            ]);
             $ecomail->processTriggerTagUpdates($subscribers, $triggerTags, $tagCacheFile);
         }
 
@@ -723,9 +731,10 @@ try {
 
     // ── Step 7: Save state ────────────────────────────────────────────
 
-    // Only save state if Ecomail confirmed imports/updates and no failures
-    $totalProcessed = $report['imported'] + $report['updated'];
-    if ($report['failed'] === 0 && $totalProcessed > 0) {
+    // Only save state if we successfully processed contacts and no failures.
+    // Note: subscribe-bulk doesn't always report inserts/updates for existing contacts,
+    // so we check $report['transformed'] (contacts sent to Ecomail) instead.
+    if ($report['failed'] === 0 && $report['transformed'] > 0) {
         $syncState->markCompleted();
         $syncState->save();
         $checkpoint->clear('contacts-sync');
