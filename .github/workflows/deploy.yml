@@ -18,9 +18,17 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Upload to FTP
+      # The hosting FTP occasionally closes the control connection mid-
+      # upload ("Server sent FIN packet unexpectedly"). Each retry picks
+      # up where the previous attempt left off because FTP-Deploy-Action
+      # persists .ftp-deploy-sync-state.json on the server, so we only
+      # re-upload files that were not yet acknowledged.
+
+      - name: Upload to FTP (attempt 1/3)
+        id: ftp1
+        continue-on-error: true
         uses: SamKirkland/FTP-Deploy-Action@v4.3.4
         with:
           server: 77.240.188.210
@@ -28,10 +36,54 @@ jobs:
           password: ${{ secrets.FTP_PASSWORD }}
           protocol: ftp
           port: 21
+          timeout: 60000
           local-dir: ./
           server-dir: /web71.cz/web/app/automatizace/
           state-name: .ftp-deploy-sync-state.json
           dangerous-clean-slate: false
+          log-level: verbose
+
+      - name: Pause before retry
+        if: steps.ftp1.outcome == 'failure'
+        run: sleep 15
+
+      - name: Upload to FTP (attempt 2/3)
+        id: ftp2
+        if: steps.ftp1.outcome == 'failure'
+        continue-on-error: true
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.4
+        with:
+          server: 77.240.188.210
+          username: optimawa
+          password: ${{ secrets.FTP_PASSWORD }}
+          protocol: ftp
+          port: 21
+          timeout: 60000
+          local-dir: ./
+          server-dir: /web71.cz/web/app/automatizace/
+          state-name: .ftp-deploy-sync-state.json
+          dangerous-clean-slate: false
+          log-level: verbose
+
+      - name: Pause before final retry
+        if: steps.ftp1.outcome == 'failure' && steps.ftp2.outcome == 'failure'
+        run: sleep 30
+
+      - name: Upload to FTP (attempt 3/3)
+        if: steps.ftp1.outcome == 'failure' && steps.ftp2.outcome == 'failure'
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.4
+        with:
+          server: 77.240.188.210
+          username: optimawa
+          password: ${{ secrets.FTP_PASSWORD }}
+          protocol: ftp
+          port: 21
+          timeout: 60000
+          local-dir: ./
+          server-dir: /web71.cz/web/app/automatizace/
+          state-name: .ftp-deploy-sync-state.json
+          dangerous-clean-slate: false
+          log-level: verbose
 
       # ── Post-deploy smoke test ─────────────────────────────────────
       # Each PHP entry-point exposes GET ?ping=1 which returns
