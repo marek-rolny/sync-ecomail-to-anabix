@@ -90,6 +90,7 @@ foreach ($required as $var) {
 if (php_sapi_name() === 'cli') {
     $dryRun = in_array('--dry-run', $argv ?? [], true);
     $fullRun = in_array('--full', $argv ?? [], true);
+    $debug = in_array('--debug', $argv ?? [], true);
     $sinceOverride = null;
     foreach ($argv ?? [] as $arg) {
         if (str_starts_with($arg, '--since=')) {
@@ -99,6 +100,7 @@ if (php_sapi_name() === 'cli') {
 } else {
     $dryRun = ($_GET['dry-run'] ?? '') === '1';
     $fullRun = ($_GET['full'] ?? '') === '1';
+    $debug = ($_GET['debug'] ?? '') === '1';
     $sinceOverride = $_GET['since'] ?? null;
 }
 
@@ -203,6 +205,49 @@ $report = [
 $runStartedAt = date('Y-m-d H:i:s');
 
 try {
+    // ── 0. Debug mode: raw API probes ─────────────────────────────────
+
+    if ($debug) {
+        output("");
+        output("=== DEBUG: raw API probes ===");
+
+        // Probe 1: /campaigns/log with no filters
+        output("Probe 1: GET /campaigns/log?per_page=5 (no filters)");
+        $probe1 = $ecomail->debugGet('/campaigns/log', ['per_page' => 5]);
+        output("  HTTP: {$probe1['_debug_http_code']}");
+        output("  URL:  {$probe1['_debug_url']}");
+        output("  Body: " . mb_substr($probe1['_debug_body'], 0, 600));
+        output("");
+
+        // Probe 2: /campaigns/log filtered by campaign_id=3 (the only real campaign)
+        output("Probe 2: GET /campaigns/log?campaign_id=3&per_page=5");
+        $probe2 = $ecomail->debugGet('/campaigns/log', ['campaign_id' => 3, 'per_page' => 5]);
+        output("  HTTP: {$probe2['_debug_http_code']}");
+        output("  URL:  {$probe2['_debug_url']}");
+        output("  Body: " . mb_substr($probe2['_debug_body'], 0, 600));
+        output("");
+
+        // Probe 3: /campaigns/3/stats-detail (alternative: per-campaign aggregates)
+        output("Probe 3: GET /campaigns/3/stats-detail?per_page=5");
+        $probe3 = $ecomail->debugGet('/campaigns/3/stats-detail', ['per_page' => 5]);
+        output("  HTTP: {$probe3['_debug_http_code']}");
+        output("  URL:  {$probe3['_debug_url']}");
+        output("  Body: " . mb_substr($probe3['_debug_body'], 0, 600));
+        output("");
+
+        // Probe 4: /campaigns/log filtered by known subscriber email
+        output("Probe 4: GET /campaigns/log?email=marek@optimal-marketing.cz&per_page=5");
+        $probe4 = $ecomail->debugGet('/campaigns/log', ['email' => 'marek@optimal-marketing.cz', 'per_page' => 5]);
+        output("  HTTP: {$probe4['_debug_http_code']}");
+        output("  URL:  {$probe4['_debug_url']}");
+        output("  Body: " . mb_substr($probe4['_debug_body'], 0, 600));
+        output("");
+
+        output("=== END DEBUG ===");
+        output("");
+        goto finish;
+    }
+
     // ── 1. Fetch all events via /campaigns/log ────────────────────────
 
     $filters = [];
