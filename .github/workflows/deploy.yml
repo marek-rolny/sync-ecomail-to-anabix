@@ -104,7 +104,6 @@ jobs:
             contacts-anabix-to-ecomail
             activities-ecomail-to-anabix
             sync-automation-events
-            sync-subscriber-events
             sync-sheets
           )
 

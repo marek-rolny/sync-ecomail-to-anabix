@@ -527,57 +527,6 @@ class EcomailClient
         return $response['subscriber'] ?? $response['data'] ?? $response;
     }
 
-    /**
-     * Get all subscribers from the configured list.
-     *
-     * Uses GET /lists/{listId}/subscribers with pagination.
-     *
-     * @return array[]  List of subscriber arrays
-     */
-    public function getSubscribers(): array
-    {
-        $all = [];
-        $page = 1;
-
-        while (true) {
-            $response = $this->get("/lists/{$this->listId}/subscribers", [
-                'per_page' => 100,
-                'page' => $page,
-            ]);
-
-            if ($response === null) {
-                break;
-            }
-
-            $subscribers = $response['subscriber'] ?? $response['subscribers'] ?? $response['data'] ?? [];
-
-            $this->logger->debug("getSubscribers page", [
-                'page' => $page,
-                'count' => count($subscribers),
-                'response_keys' => array_keys($response),
-            ]);
-
-            if (empty($subscribers) || !is_array($subscribers)) {
-                break;
-            }
-
-            foreach ($subscribers as $sub) {
-                if (is_array($sub)) {
-                    $all[] = $sub;
-                }
-            }
-
-            if (count($subscribers) < 100) {
-                break;
-            }
-
-            $page++;
-            usleep(300000);
-        }
-
-        return $all;
-    }
-
     // ── Subscriber logs (for activity sync) ──────────────────────────
 
     /**
@@ -594,96 +543,7 @@ class EcomailClient
         return $this->getCampaignLog(array_merge($filters, ['email' => $email]));
     }
 
-    /**
-     * Get tracker events for a subscriber (web visits, basket, purchase, etc.).
-     *
-     * Uses GET /subscribers/{email}/events
-     * Response: {"current_page":1,"data":[{"id","email","category","action","label","property","value","timestamp"}],...}
-     *
-     * @return array[]  List of event records
-     */
-    public function getSubscriberEvents(string $email, array $params = []): array
-    {
-        $encoded = urlencode($email);
-        $allEvents = [];
-        $page = 1;
-
-        while (true) {
-            $queryParams = array_merge($params, [
-                'per_page' => 100,
-                'page' => $page,
-            ]);
-
-            $response = $this->get("/subscribers/{$encoded}/events", $queryParams);
-
-            if ($response === null) {
-                break;
-            }
-
-            $events = $response['data'] ?? [];
-
-            if (empty($events) || !is_array($events)) {
-                break;
-            }
-
-            foreach ($events as $event) {
-                if (is_array($event)) {
-                    $allEvents[] = $event;
-                }
-            }
-
-            $lastPage = $response['last_page'] ?? null;
-            if ($lastPage !== null && $page >= $lastPage) {
-                break;
-            }
-            if (count($events) < 100) {
-                break;
-            }
-
-            $page++;
-            usleep(200000);
-        }
-
-        return $allEvents;
-    }
-
     // ── HTTP methods ──────────────────────────────────────────────────
-
-    /**
-     * Public debug wrapper for GET requests — returns raw parsed response
-     * including HTTP status code and raw body for debugging.
-     */
-    public function debugGet(string $endpoint, array $params = []): ?array
-    {
-        $url = $this->baseUrl . $endpoint;
-        if (!empty($params)) {
-            $url .= '?' . http_build_query($params);
-        }
-
-        $ch = curl_init();
-        curl_setopt_array($ch, [
-            CURLOPT_URL => $url,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER => [
-                'key: ' . $this->apiKey,
-                'Content-Type: application/json',
-            ],
-            CURLOPT_TIMEOUT => 30,
-        ]);
-
-        $body = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $error = curl_error($ch);
-        curl_close($ch);
-
-        return [
-            '_debug_http_code' => $httpCode,
-            '_debug_curl_error' => $error ?: null,
-            '_debug_url' => $url,
-            '_debug_body' => mb_substr($body ?: '', 0, 1000),
-            '_debug_parsed' => json_decode($body ?: '', true),
-        ];
-    }
 
     private function post(string $endpoint, array $data): ?array
     {
@@ -744,10 +604,6 @@ class EcomailClient
         }
 
         if ($httpCode < 200 || $httpCode >= 300) {
-            // 404 on subscriber log endpoints = subscriber has no records (treat as empty)
-            if ($httpCode === 404 && preg_match('#/subscribers/.+/(email-log|events)#', $endpoint)) {
-                return [];
-            }
             $this->logger->error("Ecomail HTTP error", [
                 'http_code' => $httpCode,
                 'response' => $this->parseErrorMessage($responseBody),

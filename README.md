@@ -78,19 +78,7 @@ php sync-automation-events.php --dry-run
 php sync-automation-events.php --pipeline=43453
 ```
 
-### 4. `sync-subscriber-events.php` — Web tracker: Ecomail → Anabix
-
-Iteruje subscribery v Ecomail listu, načítá jejich `/subscribers/{email}/events` (web tracker — návštěvy webu, košík, nákup) a vytváří `note`-aktivity typu "Návštěva webu {domain}" v Anabixu.
-
-Newsletter events (send/open/click) řeší skript č. 2, automation events řeší skript č. 3 — tento skript se stará **výhradně** o web tracker.
-
-```bash
-php sync-subscriber-events.php
-php sync-subscriber-events.php --dry-run
-php sync-subscriber-events.php --email=test@example.com
-```
-
-### 5. `sync-sheets.php` — Google Sheets → Anabix aktivity
+### 4. `sync-sheets.php` — Google Sheets → Anabix aktivity
 
 Čte řádky z veřejné Google tabulky a vytváří aktivity (poznámky) u kontaktů v Anabixu.
 
@@ -125,7 +113,6 @@ Pro pravidelný sync přidejte do cronu:
 ├── contacts-anabix-to-ecomail.php   # Sync kontaktů (Anabix → Ecomail)
 ├── activities-ecomail-to-anabix.php # Sync newsletter aktivit (Ecomail → Anabix)
 ├── sync-automation-events.php       # Sync automation/autoresponder aktivit
-├── sync-subscriber-events.php       # Sync web tracker aktivit
 ├── sync-sheets.php                  # Google Sheets → Anabix
 ├── src/
 │   ├── AnabixClient.php       # Anabix API (kontakty, seznamy, organizace, aktivity)
