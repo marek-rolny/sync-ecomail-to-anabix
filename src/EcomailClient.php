@@ -321,6 +321,92 @@ class EcomailClient
         return $allSubscribers;
     }
 
+    // ── Pipelines / Automations (for activity sync) ───────────────────
+
+    /**
+     * List all automation pipelines.
+     *
+     * Uses GET /pipelines
+     *
+     * @return array[]  List of pipeline arrays (id, name, status, created_at, ...)
+     */
+    public function getPipelines(): array
+    {
+        $response = $this->get('/pipelines');
+
+        // Response shape varies across Ecomail accounts — try common keys
+        if (is_array($response)) {
+            if (isset($response['data']) && is_array($response['data'])) {
+                return $response['data'];
+            }
+            if (isset($response['pipelines']) && is_array($response['pipelines'])) {
+                return $response['pipelines'];
+            }
+            // Already a flat list
+            if (!empty($response) && array_is_list($response)) {
+                return $response;
+            }
+        }
+
+        return [];
+    }
+
+    /**
+     * Get per-subscriber stats for an automation pipeline.
+     *
+     * Uses GET /pipelines/{pipelineId}/stats-detail
+     * Response: { "subscribers": { "email@x.com": { "open": 2, "send": 1, ... } }, "total": N, "per_page": 100 }
+     *
+     * Supports the same event types as campaigns:
+     *   open, send, unsub, soft_bounce, click, hard_bounce, out_of_band, spam
+     *
+     * @return array  Map of email => { open: int, send: int, click: int, ... }
+     */
+    public function getPipelineStatsDetail(int $pipelineId, array $params = []): array
+    {
+        $allSubscribers = [];
+        $page = 1;
+
+        while (true) {
+            $queryParams = array_merge($params, ['page' => $page, 'per_page' => 100]);
+            $response = $this->get("/pipelines/{$pipelineId}/stats-detail", $queryParams);
+
+            if ($response === null) {
+                break;
+            }
+
+            $subscribers = $response['subscribers'] ?? [];
+
+            $this->logger->debug("getPipelineStatsDetail response", [
+                'pipelineId' => $pipelineId,
+                'page' => $page,
+                'subscriber_count' => count($subscribers),
+                'total' => $response['total'] ?? null,
+            ]);
+
+            if (empty($subscribers) || !is_array($subscribers)) {
+                break;
+            }
+
+            foreach ($subscribers as $email => $stats) {
+                $allSubscribers[$email] = $stats;
+            }
+
+            // Check pagination
+            $nextPageUrl = $response['next_page_url'] ?? null;
+            $perPage = $response['per_page'] ?? 100;
+
+            if ($nextPageUrl === null || count($subscribers) < $perPage) {
+                break;
+            }
+
+            $page++;
+            usleep(300000);
+        }
+
+        return $allSubscribers;
+    }
+
     /**
      * Get campaign log — individual events (sends, opens, clicks, bounces, etc.).
      *
@@ -509,57 +595,6 @@ class EcomailClient
     }
 
     /**
-     * Get automation (pipeline) log for a subscriber.
-     *
-     * Uses GET /subscribers/{email}/automation-log
-     * Returns automation events sorted by timestamp descending.
-     *
-     * @return array[]  List of event records
-     */
-    public function getSubscriberAutomationLog(string $email, array $params = []): array
-    {
-        $encoded = urlencode($email);
-        $allEvents = [];
-        $page = 1;
-
-        while (true) {
-            $queryParams = array_merge($params, [
-                'per_page' => 100,
-                'page' => $page,
-                'sort_by' => 'timestamp',
-                'sort_dir' => 'desc',
-            ]);
-
-            $response = $this->get("/subscribers/{$encoded}/automation-log", $queryParams);
-
-            if ($response === null) {
-                break;
-            }
-
-            $logs = $response['automation_log'] ?? $response['pipeline_log'] ?? $response['data'] ?? [];
-
-            if (empty($logs) || !is_array($logs)) {
-                break;
-            }
-
-            foreach ($logs as $log) {
-                if (is_array($log)) {
-                    $allEvents[] = $log;
-                }
-            }
-
-            if (count($logs) < 100) {
-                break;
-            }
-
-            $page++;
-            usleep(200000);
-        }
-
-        return $allEvents;
-    }
-
-    /**
      * Get tracker events for a subscriber (web visits, basket, purchase, etc.).
      *
      * Uses GET /subscribers/{email}/events
@@ -710,7 +745,7 @@ class EcomailClient
 
         if ($httpCode < 200 || $httpCode >= 300) {
             // 404 on subscriber log endpoints = subscriber has no records (treat as empty)
-            if ($httpCode === 404 && preg_match('#/subscribers/.+/(email-log|automation-log|events)#', $endpoint)) {
+            if ($httpCode === 404 && preg_match('#/subscribers/.+/(email-log|events)#', $endpoint)) {
                 return [];
             }
             $this->logger->error("Ecomail HTTP error", [
