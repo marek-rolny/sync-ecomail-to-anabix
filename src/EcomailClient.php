@@ -324,35 +324,32 @@ class EcomailClient
     /**
      * Get campaign log — individual events (sends, opens, clicks, bounces, etc.).
      *
-     * Uses GET /campaigns/log with campaign_id filter.
-     * Response: { "campaign_log": [ { "id", "campaign_id", "event", "email", ... }, ... ] }
+     * Uses GET /campaigns/log with query string filters.
+     * Supports filtering by: campaign_id, email, events[], date_from, date_to.
+     *
+     * Response: { "campaign_log": [ {id, campaign_id, event, email, occured_at, ...} ],
+     *             "current_page", "per_page", "total", "last_page" }
      *
      * Possible event types: send, open, click, hard_bounce, soft_bounce,
      *                       out_of_band, unsub, spam, spam_complaint.
      *
-     * @param int      $campaignId  Campaign to fetch events for
-     * @param string[] $events      Event types to filter (empty = all)
+     * @param array $filters  Optional filters: campaign_id, email, events (array), date_from, date_to
      * @return array[]  List of event records
      */
-    public function getCampaignLog(int $campaignId, array $events = []): array
+    public function getCampaignLog(array $filters = []): array
     {
         $allEvents = [];
         $page = 1;
 
         while (true) {
-            $queryParams = [
+            $queryParams = array_merge($filters, [
                 'per_page' => 100,
                 'page' => $page,
                 'sort_by' => 'occured_at',
                 'sort_dir' => 'desc',
-            ];
+            ]);
 
-            if (!empty($events)) {
-                $queryParams['events[]'] = implode(',', $events);
-            }
-
-            // Endpoint: GET /campaigns/{id}/log (ID in path, not query param)
-            $response = $this->get("/campaigns/{$campaignId}/log", $queryParams);
+            $response = $this->get('/campaigns/log', $queryParams);
 
             if ($response === null) {
                 break;
@@ -361,10 +358,11 @@ class EcomailClient
             $logs = $response['campaign_log'] ?? $response['data'] ?? [];
 
             $this->logger->debug("getCampaignLog response", [
-                'campaignId' => $campaignId,
                 'page' => $page,
                 'log_count' => count($logs),
-                'response_keys' => array_keys($response),
+                'total' => $response['total'] ?? null,
+                'last_page' => $response['last_page'] ?? null,
+                'filters' => $filters,
             ]);
 
             if (empty($logs) || !is_array($logs)) {
@@ -377,7 +375,8 @@ class EcomailClient
                 }
             }
 
-            if (count($logs) < 100) {
+            $lastPage = (int) ($response['last_page'] ?? 1);
+            if ($page >= $lastPage) {
                 break;
             }
 
@@ -398,7 +397,7 @@ class EcomailClient
     public function getCampaignEvents(int $campaignId): array
     {
         // Primary: campaign log — gives individual events
-        $events = $this->getCampaignLog($campaignId);
+        $events = $this->getCampaignLog(['campaign_id' => $campaignId]);
 
         if (!empty($events)) {
             return $events;
@@ -498,56 +497,15 @@ class EcomailClient
     /**
      * Get email (campaign) log for a subscriber.
      *
-     * Uses GET /subscribers/{email}/email-log
-     * Returns campaign events: send, open, click, hard_bounce, soft_bounce,
-     *                          out_of_band, unsub, spam, spam_complaint.
+     * Wrapper around getCampaignLog() with email filter.
+     * /subscribers/{email}/email-log returns 403 on some accounts,
+     * so we use /campaigns/log?email=... instead — same data, works universally.
      *
      * @return array[]  List of event records
      */
-    public function getSubscriberEmailLog(string $email, array $params = []): array
+    public function getSubscriberEmailLog(string $email, array $filters = []): array
     {
-        // /subscribers/{email}/email-log returns 403 on some accounts.
-        // Use /campaigns/log?email=... instead — same data, works universally.
-        $allEvents = [];
-        $page = 1;
-
-        while (true) {
-            $queryParams = array_merge($params, [
-                'email' => $email,
-                'per_page' => 100,
-                'page' => $page,
-                'sort_by' => 'occured_at',
-                'sort_dir' => 'desc',
-            ]);
-
-            $response = $this->get('/campaigns/log', $queryParams);
-
-            if ($response === null) {
-                break;
-            }
-
-            // API returns: {"campaign_log":[{...}]}
-            $logs = $response['campaign_log'] ?? $response['data'] ?? [];
-
-            if (empty($logs) || !is_array($logs)) {
-                break;
-            }
-
-            foreach ($logs as $log) {
-                if (is_array($log)) {
-                    $allEvents[] = $log;
-                }
-            }
-
-            if (count($logs) < 100) {
-                break;
-            }
-
-            $page++;
-            usleep(200000);
-        }
-
-        return $allEvents;
+        return $this->getCampaignLog(array_merge($filters, ['email' => $email]));
     }
 
     /**
